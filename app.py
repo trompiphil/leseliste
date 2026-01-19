@@ -140,7 +140,6 @@ def check_structure(ws):
     try:
         head = ws.row_values(1)
         if not head: ws.update_cell(1,1,"Titel"); head=["Titel"]
-        # JETZT NEU: TAGS SPALTE
         needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags"]
         next_c = len(head)+1
         for n in needed:
@@ -149,7 +148,6 @@ def check_structure(ws):
     except: pass
 
 def get_data(ws):
-    # JETZT NEU: TAGS SPALTE LADEN
     cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags"]
     try:
         raw = ws.get_all_values()
@@ -162,15 +160,11 @@ def get_data(ws):
                 idx = h_map.get(c.lower())
                 val = r[idx] if idx is not None and idx < len(r) else ""
                 d[c] = val
-            
             try:
                 raw_val = d["Bewertung"]
-                if isinstance(raw_val, str) and raw_val.strip().isdigit():
-                    d["Bewertung"] = int(raw_val)
-                elif isinstance(raw_val, (int, float)):
-                    d["Bewertung"] = int(raw_val)
-                else:
-                    d["Bewertung"] = 0
+                if isinstance(raw_val, str) and raw_val.strip().isdigit(): d["Bewertung"] = int(raw_val)
+                elif isinstance(raw_val, (int, float)): d["Bewertung"] = int(raw_val)
+                else: d["Bewertung"] = 0
             except: d["Bewertung"] = 0
             
             if not d["Status"]: d["Status"] = "Gelesen"
@@ -199,7 +193,6 @@ def update_full_dataframe(ws, new_df):
     headers = [str(h).lower() for h in current_data[0]]
     col_idx = {k: headers.index(k) for k in ["titel","autor","bewertung","notiz","status"] if k in headers}
     if not col_idx: return False
-    
     for index, row in new_df.iterrows():
         try:
             cell = ws.find(row["Titel"])
@@ -234,7 +227,7 @@ def fetch_meta(titel, autor):
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags(titel, autor):
-    """Generiert Tags (ohne Cache hier, da beim Speichern genutzt)"""
+    """Generiert Tags"""
     if "gemini_api_key" not in st.secrets: return ""
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
@@ -252,6 +245,49 @@ def get_ai_tags(titel, autor):
         response = model.generate_content(prompt)
         return response.text.strip()
     except: return ""
+
+def batch_update_tags(ws, df):
+    """Geht alle Bücher ohne Tags durch und generiert sie"""
+    if "Tags" not in df.columns: return 0
+    
+    # Finde Zeilen ohne Tags
+    # (Achtung: Leere Strings oder NaN)
+    df_missing = df[ (df["Tags"] == "") | (df["Tags"].isnull()) ]
+    
+    if df_missing.empty: return 0
+    
+    # Progress Bar UI
+    progress_bar = st.sidebar.progress(0)
+    status_text = st.sidebar.empty()
+    
+    count = 0
+    total = len(df_missing)
+    
+    # Header Index für Tags finden
+    headers = [str(h).lower() for h in ws.row_values(1)]
+    try: col_tag_idx = headers.index("tags") + 1
+    except: return 0
+
+    for i, row in df_missing.iterrows():
+        status_text.text(f"Tagge: {row['Titel']}...")
+        new_tags = get_ai_tags(row["Titel"], row["Autor"])
+        
+        # Update in Sheet
+        try:
+            cell = ws.find(row["Titel"])
+            ws.update_cell(cell.row, col_tag_idx, new_tags)
+            count += 1
+        except: pass
+        
+        # Update Progress
+        progress_bar.progress(count / total)
+        time.sleep(1.0) # API Limit Schutz
+        
+    status_text.text("Fertig!")
+    time.sleep(1)
+    status_text.empty()
+    progress_bar.empty()
+    return count
 
 @st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
@@ -341,7 +377,6 @@ def show_book_details(book, ws_books, ws_authors):
             if book.get('Bewertung'):
                 st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
             
-            # --- TAGS ANZEIGEN ---
             if "Tags" in book and book["Tags"]:
                 st.write("")
                 tags_list = book["Tags"].split(",")
@@ -377,9 +412,8 @@ def show_book_details(book, ws_books, ws_authors):
         with st.form("edit_book_form"):
             new_title = st.text_input("Titel", value=book["Titel"])
             new_author = st.text_input("Autor", value=book["Autor"])
-            # Editierbare Tags
             current_tags = book.get("Tags", "")
-            new_tags = st.text_input("Tags (z.B. #Fantasy, #Epos)", value=current_tags)
+            new_tags = st.text_input("Tags", value=current_tags)
             
             if st.form_submit_button("💾 Änderungen speichern"):
                 try:
@@ -387,9 +421,8 @@ def show_book_details(book, ws_books, ws_authors):
                     headers = [str(h).lower() for h in ws_books.row_values(1)]
                     col_t = headers.index("titel") + 1
                     col_a = headers.index("autor") + 1
-                    # Tags Spalte finden oder Fehler vermeiden
                     try: col_tags = headers.index("tags") + 1
-                    except: col_tags = len(headers) + 1 # Fallback
+                    except: col_tags = len(headers) + 1 
                     
                     ws_books.update_cell(cell.row, col_t, new_title)
                     ws_books.update_cell(cell.row, col_a, new_author)
@@ -412,11 +445,6 @@ def show_book_details(book, ws_books, ws_authors):
 
 # --- MAIN ---
 def main():
-    with st.sidebar:
-        st.write("🔧 **Einstellungen**")
-        if st.button("🔄 Cache leeren"): 
-            st.session_state.clear(); st.rerun()
-        
     st.title("📚 Meine Bibliothek")
     
     client = get_connection()
@@ -430,7 +458,25 @@ def main():
     df = st.session_state.df_books
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
-    tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "📊 Statistik"])
+    # --- SIDEBAR MIT SETTINGS & BATCH TAGGING ---
+    with st.sidebar:
+        st.write("🔧 **Einstellungen**")
+        if st.button("🔄 Cache leeren"): 
+            st.session_state.clear(); st.rerun()
+        
+        st.markdown("---")
+        st.write("🤖 **KI-Tools**")
+        if st.button("✨ Tags nachgenerieren"):
+            count = batch_update_tags(ws_books, df)
+            if count > 0:
+                st.success(f"{count} Bücher getaggt!")
+                del st.session_state.df_books
+                time.sleep(2)
+                st.rerun()
+            else:
+                st.info("Alle Bücher haben schon Tags.")
+
+    tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik & Autoren"])
     
     # --- NEU ---
     with tab_neu:
@@ -446,9 +492,8 @@ def main():
                     val = (rate + 1) if rate is not None else 0
                     t, a = [x.strip() for x in inp.split(",", 1)]
                     fa = smart_author(a, authors)
-                    with st.spinner("Lade Metadaten & generiere Tags..."):
+                    with st.spinner("KI generiert Tags..."):
                         c, g = fetch_meta(t, fa)
-                        # KI TAGGING HIER:
                         tags = get_ai_tags(t, fa)
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", tags])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
@@ -460,6 +505,7 @@ def main():
     with tab_sammlung:
         view = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed")
         df_s = df[df["Status"] == "Gelesen"].copy()
+        
         q = st.text_input("Suche...", label_visibility="collapsed")
         if q: df_s = df_s[df_s["Titel"].str.lower().str.contains(q.lower())]
         
@@ -493,12 +539,8 @@ def main():
                             if st.button("ℹ️ Info", key=f"k_{idx}"): show_book_details(row, ws_books, ws_authors)
                         with c2:
                             st.write(f"**{row['Titel']}**")
-                            # Zeige Tags auch in der Kachel (klein)
-                            if "Tags" in row and row["Tags"]:
-                                first_tag = row["Tags"].split(",")[0]
-                                st.caption(f"{row['Autor']} • {first_tag}")
-                            else:
-                                st.caption(row["Autor"])
+                            if "Tags" in row and row["Tags"]: st.caption(f"{row['Autor']} • {row['Tags'].split(',')[0]}")
+                            else: st.caption(row["Autor"])
                             
                             try: star_val = int(row['Bewertung'])
                             except: star_val = 0
@@ -527,7 +569,6 @@ def main():
                     if "," in iw:
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         c, g = fetch_meta(t, a)
-                        # KI TAGGING HIER:
                         tags = get_ai_tags(t, a)
                         ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", tags])
                         del st.session_state.df_books; st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
@@ -571,18 +612,18 @@ def main():
                     show_book_details(df_w.loc[sel_idx], ws_books, ws_authors)
         else: st.info("Leer.")
 
-    # --- STATISTIK ---
+    # --- STATISTIK & AUTOREN ---
     with tab_stats:
-        st.header("📊 Statistik")
+        st.header("📊 Statistik & Autoren")
         df_r = df[df["Status"] == "Gelesen"]
         c1, c2 = st.columns(2)
         c1.metric("Gelesen", len(df_r))
         if not df_r.empty:
             top = df_r["Autor"].mode()[0]
             c2.metric("Top Autor", top)
+            
             st.markdown("---")
             st.subheader("Lieblings-Themen (Tags)")
-            # Tag Cloud Logik
             all_tags = []
             if "Tags" in df_r.columns:
                 for t in df_r["Tags"].dropna():
@@ -591,8 +632,12 @@ def main():
                     tag_counts = pd.Series(all_tags).value_counts().reset_index()
                     tag_counts.columns = ["Thema", "Anzahl"]
                     st.dataframe(tag_counts, use_container_width=True, hide_index=True)
-                else: st.info("Noch keine Tags generiert.")
-            else: st.info("Noch keine Tags vorhanden.")
+            
+            st.markdown("---")
+            st.subheader("👥 Autoren Liste")
+            auth_counts = df_r["Autor"].value_counts().reset_index()
+            auth_counts.columns = ["Autor", "Anzahl Bücher"]
+            st.dataframe(auth_counts, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
