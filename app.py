@@ -55,6 +55,13 @@ st.markdown("""
         background-color: #d35400 !important;
         color: white !important;
     }
+    
+    /* Feedback Widget (Sterne) etwas kompakter machen */
+    .stFeedback {
+        padding-top: 0px !important;
+        padding-bottom: 5px !important;
+        justify-content: center;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -129,7 +136,6 @@ def update_single_entry(ws, titel, field, value):
     except: return False
 
 def update_full_dataframe(ws, new_df):
-    # (Identisch zu vorher, für Listen-Bulk-Edit)
     current_data = ws.get_all_values()
     headers = [str(h).lower() for h in current_data[0]]
     col_idx = {
@@ -194,7 +200,6 @@ def smart_author(short, known):
     return short
 
 def cleanup_author_duplicates_batch(ws_books, ws_authors):
-    # Gleiche Logik wie zuvor
     import unicodedata
     def deep_clean(text): return unicodedata.normalize('NFKC', str(text)).replace('\u00A0', ' ').strip()
     books_vals = ws_books.get_all_values()
@@ -235,25 +240,6 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in final_authors])
     return 1
 
-# --- CALLBACKS (Für Live-Speichern in Kacheln) ---
-def save_note_callback(titel, key):
-    # Holt den neuen Wert aus dem Session State
-    new_val = st.session_state[key]
-    # Speichert in Session Dataframe (für sofortige Anzeige)
-    st.session_state.df_books.loc[st.session_state.df_books["Titel"] == titel, "Notiz"] = new_val
-    # Speichert in Google Sheet (Hintergrund)
-    # ACHTUNG: Das passiert bei JEDEM Tastendruck/Blur. Um API Limits zu schonen, nutzen wir session state und schreiben beim Reload? 
-    # Nein, User will "einfach klicken". Wir schreiben direkt.
-    # Um gspread-Verbindung nicht neu aufzubauen, holen wir sie hier nicht, sondern nutzen eine globale Referenz oder einfachen Hack.
-    # Da wir client nicht im Scope haben -> Wir müssen es hier lokal holen.
-    try:
-        conn = get_connection()
-        sh = conn.open("Bücherliste").sheet1
-        update_single_entry(sh, titel, "Notiz", new_val)
-        st.toast(f"Notiz für '{titel}' gespeichert!")
-    except:
-        st.error("Fehler beim Speichern der Notiz.")
-
 # --- MAIN ---
 def main():
     st.title("📚 Meine Bibliothek")
@@ -278,7 +264,6 @@ def main():
     if nav == "✍️ Neu (Gelesen)":
         st.header("Buch hinzufügen")
         
-        # FORMULAR MIT CLEAR_ON_SUBMIT
         with st.form("add_book_form", clear_on_submit=True):
             c1, c2 = st.columns([2, 1])
             with c1:
@@ -299,7 +284,7 @@ def main():
                         cov, gen = fetch_meta(tit, final_aut)
                         ws_books.append_row([tit, final_aut, gen, rating_val, cov or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen"])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
-                        del st.session_state.df_books # Cache leeren für Reload
+                        del st.session_state.df_books 
                     st.success(f"Gespeichert: {tit}")
                     time.sleep(1)
                     st.rerun()
@@ -335,9 +320,9 @@ def main():
                 column_config={
                     "Titel": st.column_config.TextColumn(disabled=True),
                     "Autor": st.column_config.TextColumn("Autor"),
-                    "Bewertung": st.column_config.NumberColumn("⭐", min_value=1, max_value=5, step=1),
+                    "Bewertung": st.column_config.NumberColumn("⭐", min_value=1, max_value=5, step=1, help="Wert von 1-5"),
                     "Cover": st.column_config.ImageColumn("Img", width="small"),
-                    "Notiz": st.column_config.TextColumn("Notiz", width="large"),
+                    "Notiz": st.column_config.TextColumn("Notiz (Editierbar)", width="large"),
                     "Hinzugefügt": st.column_config.DateColumn("Datum", disabled=True, format="DD.MM.YYYY"),
                     "Löschen": st.column_config.CheckboxColumn("🗑️")
                 },
@@ -353,50 +338,68 @@ def main():
                         st.success("Gespeichert!")
                         time.sleep(1); st.rerun()
 
-        # --- KACHELN (NATIVE STREAMLIT LAYOUT) ---
+        # --- KACHELN ---
         else:
             cols = st.columns(3) 
             for i, (idx, row) in enumerate(df_show.iterrows()):
                 with cols[i % 3]:
-                    # Rahmen via st.container (css gestylt)
+                    # NATIVE CONTAINER
                     with st.container(border=True):
                         c_img, c_info = st.columns([1, 2])
                         
-                        # LINKE SPALTE: BILD & STERNE
+                        # --- LINKS: Bild & Klickbare Sterne ---
                         with c_img:
                             cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
                             st.image(cov, use_container_width=True)
                             
-                            try: stars = int(row["Bewertung"])
-                            except: stars = 0
-                            # Sterne Anzeige (orange/grau)
-                            st.markdown(f"<div style='text-align:center; color:#d35400; font-size:1.2em;'>{'★'*stars}<span style='color:#ccc;'>{'★'*(5-stars)}</span></div>", unsafe_allow_html=True)
+                            # INTERAKTIVE BEWERTUNG
+                            try: stars_current = int(row["Bewertung"])
+                            except: stars_current = 0
+                            
+                            # Feedback widget returns index (0=1 Star, 4=5 Stars)
+                            default_idx = stars_current - 1 if stars_current > 0 else None
+                            
+                            new_rating_idx = st.feedback(
+                                "stars", 
+                                key=f"star_widget_{idx}",
+                                disabled=False 
+                            )
+                            
+                            # Initiale Anzeige setzen (Trick, da default_value im feedback buggy sein kann bei Reruns)
+                            # Wir prüfen, ob User geklickt hat (session_state hat den Wert)
+                            # Wenn nicht, ist es None.
+                            
+                            # Wenn User klickt, wird reloaded. Wir vergleichen session state mit DB wert.
+                            widget_key = f"star_widget_{idx}"
+                            if widget_key in st.session_state and st.session_state[widget_key] is not None:
+                                user_val = st.session_state[widget_key] + 1
+                                if user_val != stars_current:
+                                    # Auto-Save Rating
+                                    update_single_entry(ws_books, row["Titel"], "Bewertung", user_val)
+                                    st.toast(f"Bewertung für '{row['Titel']}' gespeichert!")
+                                    del st.session_state.df_books
+                                    time.sleep(0.5)
+                                    st.rerun()
 
-                        # RECHTE SPALTE: TITEL & NOTIZ-INPUT
+                        # --- RECHTS: Titel & Direktes Notiz-Feld ---
                         with c_info:
                             st.subheader(row["Titel"])
                             st.caption(row["Autor"])
                             
-                            # DIREEKTE EINGABE (Auto-Save on Blur)
-                            # Wir nutzen on_change Callback
+                            # Auto-Save Notiz Input
                             current_note = row["Notiz"]
                             new_note = st.text_area(
                                 "Notiz", 
                                 value=current_note, 
                                 key=f"note_area_{idx}", 
                                 label_visibility="collapsed",
-                                height=80, # Kompakte Höhe
+                                height=80, 
                                 placeholder="Notiz hier tippen..."
                             )
                             
-                            # Logik: Wenn sich der Wert unterscheidet (nach Enter/Klick-weg), speichern
-                            # Da st.text_area erst beim Rerun den neuen Wert liefert, müssen wir prüfen:
                             if new_note != current_note:
-                                # Speichern
                                 update_single_entry(ws_books, row["Titel"], "Notiz", new_note)
-                                st.toast(f"Gespeichert: {row['Titel']}")
-                                # Session State updaten, damit es beim nächsten Rerun nicht flackert
-                                # (Da wir Session State löschen, passiert das eh)
+                                st.toast(f"Notiz gespeichert!")
                                 del st.session_state.df_books
                                 time.sleep(0.5)
                                 st.rerun()
@@ -412,6 +415,7 @@ def main():
                     t, a = [x.strip() for x in i_w.split(",",1)]
                     c, g = fetch_meta(t, a)
                     ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), n_w, "Wunschliste"])
+                    cleanup_author_duplicates_batch(ws_books, ws_authors)
                     del st.session_state.df_books; st.rerun()
         
         df_w = st.session_state.df_books[st.session_state.df_books["Status"]=="Wunschliste"].copy()
