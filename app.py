@@ -122,9 +122,7 @@ def check_and_update_structure(ws):
     except: pass
 
 def fetch_data_from_sheet(worksheet):
-    # Definition aller Spalten, die wir erwarten
     expected_cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Name"]
-    
     try:
         all_values = worksheet.get_all_values()
         if len(all_values) < 2: 
@@ -145,7 +143,6 @@ def fetch_data_from_sheet(worksheet):
 
         rows = []
         for raw_row in all_values[1:]:
-            # Standardwerte setzen (verhindert KeyError bei fehlenden Spalten)
             entry = {c: "" for c in expected_cols}
             entry["Status"] = "Gelesen" 
             
@@ -166,7 +163,7 @@ def force_reload():
     st.rerun()
 
 def sync_authors(ws_books, ws_authors):
-    if "sync_done" in st.session_state: return 0
+    # Gibt die Anzahl der neuen Autoren zurück
     if "df_books" not in st.session_state: st.session_state.df_books = fetch_data_from_sheet(ws_books)
     if "df_authors" not in st.session_state: st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
     
@@ -185,10 +182,9 @@ def sync_authors(ws_books, ws_authors):
     
     if missing:
         ws_authors.append_rows([[name] for name in missing])
-        st.session_state.sync_done = True
+        # WICHTIG: Cache löschen, damit beim Reload alles frisch ist
         del st.session_state.df_authors
         return len(missing)
-    st.session_state.sync_done = True
     return 0
 
 # --- HELPER ---
@@ -272,7 +268,6 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
 def main():
     st.title("📚 Meine Bibliothek")
     
-    # --- NOTFALL KNOPF GANZ OBEN ---
     if st.sidebar.button("🚨 Cache leeren & Neustart"):
         st.session_state.clear()
         st.rerun()
@@ -291,14 +286,17 @@ def main():
         with st.spinner("Lade Bücher..."): st.session_state.df_books = fetch_data_from_sheet(ws_books)
     if "df_authors" not in st.session_state: st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
 
-    # --- SICHERHEITSCHECK: DATAFRAME REPARIEREN ---
-    # Falls das DataFrame aus dem Cache noch alt ist und keine "Notiz" hat
-    for required_col in ["Notiz", "Status", "Hinzugefügt"]:
-        if required_col not in st.session_state.df_books.columns:
-            st.session_state.df_books[required_col] = ""
+    # --- HIER WAR DER FIX NÖTIG ---
+    added_count = sync_authors(ws_books, ws_authors)
+    if added_count > 0:
+        # Wenn Autoren hinzugefügt wurden (z.B. Patrick Rothfuss), müssen wir neu laden!
+        # Sonst stürzt die App ab, weil df_authors gelöscht wurde.
+        st.rerun()
 
-    sync_authors(ws_books, ws_authors)
-    
+    # Jetzt ist sichergestellt, dass df_authors existiert (frisch geladen oder aus Cache)
+    if "df_authors" not in st.session_state:
+        st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
+
     known_authors = []
     if "Name" in st.session_state.df_authors.columns:
         known_authors = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
