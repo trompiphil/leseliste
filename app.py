@@ -230,27 +230,48 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
+# HILFSFUNKTION: ROBUSTER KI AUFRUF
+def call_gemini_safe(model, prompt):
+    try:
+        return model.generate_content(prompt)
+    except Exception as e:
+        if "429" in str(e): # Limit reached
+            return None # Signalisiert "Pause machen"
+        raise e
+
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
     if "gemini_api_key" not in st.secrets: return {"tags": "", "year": ""}
+    
+    genai.configure(api_key=st.secrets["gemini_api_key"])
+    
+    # Modellwahl: Bevorzuge Flash, sonst irgendwas
+    all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    selected = next((m for m in all_models if "flash" in m), None)
+    if not selected: selected = all_models[0] if all_models else None
+    
+    if not selected: return {"tags": "", "year": ""}
+
+    model = genai.GenerativeModel(selected)
+    prompt = f"""
+    Buch: "{titel}" von {autor}.
+    Aufgabe: 
+    1. Gib mir 3-5 Tags (Themen/Stimmung, z.B. #Düster).
+    2. Gib mir das Erscheinungsjahr (YYYY).
+    Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
+    """
+    
+    # Versuch mit Retry
     try:
-        genai.configure(api_key=st.secrets["gemini_api_key"])
-        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        selected = next((m for m in all_models if "flash" in m and "1.5" in m), None)
-        if not selected: selected = next((m for m in all_models if "pro" in m and "1.5" in m), all_models[0] if all_models else None)
-        
-        model = genai.GenerativeModel(selected)
-        prompt = f"""
-        Buch: "{titel}" von {autor}.
-        Aufgabe: 
-        1. Gib mir 3-5 Tags (Themen/Stimmung, z.B. #Düster).
-        2. Gib mir das Erscheinungsjahr (YYYY).
-        Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
-        """
-        response = model.generate_content(prompt)
+        response = call_gemini_safe(model, prompt)
+        if response is None: # 429 Error
+            time.sleep(20) # Lange Pause
+            response = model.generate_content(prompt) # 2. Versuch
+            
         text = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
-    except: return {"tags": "", "year": ""}
+    except:
+        return {"tags": "", "year": ""}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -270,18 +291,24 @@ def batch_enrich_books(ws, df):
     total = len(df_missing)
     
     for i, row in df_missing.iterrows():
-        status_text.text(f"Analysiere: {row['Titel']}...")
+        status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
+        
+        # KI Call (mit eingebautem Retry wenn nötig)
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
+        
         try:
             cell = ws.find(row["Titel"])
             current_tags = row["Tags"]
             current_year = row["Erschienen"]
+            
             if not current_tags and ai_res.get("tags"): ws.update_cell(cell.row, col_tag_idx, ai_res["tags"])
             if not current_year and ai_res.get("year"): ws.update_cell(cell.row, col_year_idx, ai_res["year"])
             count += 1
         except: pass
+        
         progress_bar.progress((count + 1) / total)
-        time.sleep(1.5)
+        # WICHTIG: 5 Sekunden Pause zwischen den Büchern um Limit zu respektieren (15 req/min)
+        time.sleep(5.0) 
         
     status_text.text("Fertig!")
     time.sleep(1)
@@ -296,8 +323,8 @@ def get_ai_book_info(titel, autor):
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
         all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        selected = next((m for m in all_models if "flash" in m and "1.5" in m), None)
-        if not selected: selected = next((m for m in all_models if "pro" in m and "1.5" in m), all_models[0] if all_models else None)
+        selected = next((m for m in all_models if "flash" in m), None) # Breitere Suche nach Flash
+        if not selected: selected = all_models[0] if all_models else None
         
         model = genai.GenerativeModel(selected)
         prompt = f"""
@@ -367,6 +394,7 @@ def show_book_details(book, ws_books, ws_authors):
     
     with d_tab1:
         st.markdown(f"### {book['Titel']}")
+        
         # SICHERE ABFRAGE DES JAHRES
         year_val = book.get('Erschienen')
         year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
@@ -415,7 +443,11 @@ def show_book_details(book, ws_books, ws_authors):
         with st.form("edit_book_form"):
             new_title = st.text_input("Titel", value=book["Titel"])
             new_author = st.text_input("Autor", value=book["Autor"])
-            new_year = st.text_input("Erscheinungsjahr", value=book.get("Erschienen", ""))
+            
+            # Sicherer Umgang mit fehlendem Key
+            current_y = book.get("Erschienen", "")
+            new_year = st.text_input("Erscheinungsjahr", value=current_y)
+            
             current_tags = book.get("Tags", "")
             new_tags = st.text_input("Tags", value=current_tags)
             
@@ -464,7 +496,6 @@ def main():
         with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
     
     # --- HOTFIX: MIGRATION CHECK ---
-    # Prüft, ob die geladene Tabelle schon die neue Spalte hat. Wenn nicht: Neu laden.
     if "df_books" in st.session_state:
         if "Erschienen" not in st.session_state.df_books.columns:
             st.session_state.df_books = get_data(ws_books)
@@ -507,6 +538,7 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Lade Metadaten (inkl. Jahr & Tags)..."):
                         c, g, y = fetch_meta(t, fa)
+                        # KI Tags
                         ai_res = get_ai_tags_and_year(t, fa)
                         tags = ai_res["tags"]
                         if not y: y = ai_res["year"]
@@ -554,8 +586,9 @@ def main():
                             if st.button("ℹ️ Info", key=f"k_{idx}"): show_book_details(row, ws_books, ws_authors)
                         with c2:
                             st.write(f"**{row['Titel']}**")
+                            # Anzeige Jahr und Tags
                             meta_line = row["Autor"]
-                            if row["Erschienen"]: meta_line += f" ({row['Erschienen']})"
+                            if row.get("Erschienen"): meta_line += f" ({row['Erschienen']})"
                             if "Tags" in row and row["Tags"]: 
                                 first_tag = row["Tags"].split(",")[0]
                                 meta_line += f" • {first_tag}"
@@ -614,7 +647,7 @@ def main():
                             with c2:
                                 st.write(f"**{row['Titel']}**")
                                 meta_line = row["Autor"]
-                                if row["Erschienen"]: meta_line += f" ({row['Erschienen']})"
+                                if row.get("Erschienen"): meta_line += f" ({row['Erschienen']})"
                                 st.caption(meta_line)
                                 old_n = row["Notiz"]
                                 new_n = st.text_area("Notiz", old_n, key=f"wn_{idx}", height=70, label_visibility="collapsed")
