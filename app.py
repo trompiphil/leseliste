@@ -211,31 +211,45 @@ def fetch_meta(titel, autor):
 
 @st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
-    """Fragt Google Gemini nach einer Zusammenfassung und Bio"""
+    """Fragt Google Gemini - Mit automatischer Modell-Erkennung"""
     if "gemini_api_key" not in st.secrets:
         return {"teaser": "Fehler: 'gemini_api_key' fehlt in Secrets.", "bio": "-"}
     
+    genai.configure(api_key=st.secrets["gemini_api_key"])
+    
+    prompt = f"""
+    Du bist ein literarischer Assistent.
+    Buch: "{titel}" von {autor}.
+    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
+    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
+    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
+    """
+
+    # Strategie: Wir probieren Modelle durch, bis eines klappt
+    models_to_try = ['gemini-1.5-flash', 'gemini-pro', 'gemini-1.0-pro']
+    
+    last_error = ""
+    
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name) 
+            response = model.generate_content(prompt)
+            text = response.text.replace("```json", "").replace("```", "").strip()
+            import json
+            return json.loads(text)
+        except Exception as e:
+            last_error = str(e)
+            continue # Nächstes Modell probieren
+            
+    # Wenn wir hier sind, haben alle versagt -> Wir listen auf, was möglich ist
     try:
-        genai.configure(api_key=st.secrets["gemini_api_key"])
-        # WICHTIG: Wir nutzen jetzt das Modell, das mit der neuen Library funktioniert
-        model = genai.GenerativeModel('gemini-1.5-flash') 
-        
-        prompt = f"""
-        Du bist ein literarischer Assistent.
-        Buch: "{titel}" von {autor}.
-        
-        Aufgabe 1: Schreibe einen spannenden Teaser über den Inhalt (max 80 Wörter). Keine Spoiler!
-        Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
-        
-        Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
-        """
-        response = model.generate_content(prompt)
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        import json
-        return json.loads(text)
-        
-    except Exception as e:
-        return {"teaser": f"KI-Fehler: {str(e)}", "bio": "Bitte requirements.txt prüfen."}
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        return {
+            "teaser": f"Kein Modell funktionierte. Letzter Fehler: {last_error}", 
+            "bio": f"Verfügbare Modelle laut API: {available_models}"
+        }
+    except:
+        return {"teaser": f"Totalausfall: {last_error}", "bio": "API Key prüfen."}
 
 def smart_author(short, known):
     s = short.strip().lower()
