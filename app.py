@@ -227,42 +227,59 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- NEUER KI-AUFRUF: DIREKT VIA REST API (KEINE BIBLIOTHEK MEHR) ---
-def call_gemini_direct(prompt):
-    """Ruft die Gemini API direkt via HTTP auf - bypasses library issues"""
-    if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
-    
+# --- INTELLIGENTE MODELLSUCHE (REST API) ---
+@st.cache_data(show_spinner=False)
+def find_working_model():
+    """Fragt die API, welche Modelle verfügbar sind und gibt das beste zurück"""
+    if "gemini_api_key" not in st.secrets: return None
     api_key = st.secrets["gemini_api_key"]
-    # URL für Flash 1.5
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
+    # 1. Liste aller Modelle abrufen
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        r = requests.get(url)
+        if r.status_code != 200: return "gemini-1.5-flash" # Fallback
+        
+        data = r.json()
+        models = [m['name'].replace('models/', '') for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+        
+        # 2. Das beste Modell auswählen (Priorität: Flash -> Pro -> Irgendwas)
+        # Wir suchen KEIN 2.5, um sicherzugehen!
+        for m in models:
+            if "flash" in m and "1.5" in m: return m
+        for m in models:
+            if "pro" in m and "1.5" in m: return m
+        for m in models:
+            if "1.0" in m and "pro" in m: return m
+            
+        return models[0] if models else "gemini-1.5-flash"
+    except:
+        return "gemini-1.5-flash" # Harter Fallback
+
+# --- KI AUFRUF (REST API) ---
+def call_gemini_direct(prompt):
+    if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
+    api_key = st.secrets["gemini_api_key"]
+    
+    # Finde das richtige Modell für diesen API Key
+    model_name = find_working_model()
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
-    data = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, headers=headers, json=data)
-        
         if response.status_code == 200:
             result = response.json()
             try:
-                # Extrahiere Text aus der verschachtelten JSON Antwort
                 text = result['candidates'][0]['content']['parts'][0]['text']
-                # Clean JSON markdown if present
                 clean_text = text.replace("```json", "").replace("```", "").strip()
                 return clean_text, None
-            except:
-                return None, "Ungültiges Antwortformat von Google"
-        elif response.status_code == 429:
-            return None, "429: Rate Limit"
-        else:
-            return None, f"Fehler {response.status_code}: {response.text}"
-            
-    except Exception as e:
-        return None, f"Verbindungsfehler: {str(e)}"
+            except: return None, "Leere Antwort"
+        elif response.status_code == 429: return None, "Rate Limit"
+        else: return None, f"Fehler {response.status_code} ({model_name})"
+    except Exception as e: return None, str(e)
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
@@ -273,12 +290,23 @@ def get_ai_tags_and_year(titel, autor):
     2. Gib mir das Erscheinungsjahr (YYYY).
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
-    
     raw_text, err = call_gemini_direct(prompt)
     if not raw_text: return {"tags": "", "year": ""}
-    
     try: return json.loads(raw_text)
     except: return {"tags": "", "year": ""}
+
+@st.cache_data(show_spinner=False)
+def get_ai_book_info(titel, autor):
+    prompt = f"""
+    Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
+    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
+    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
+    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
+    """
+    raw_text, err = call_gemini_direct(prompt)
+    if not raw_text: return {"teaser": f"KI pausiert ({err})", "bio": "-"}
+    try: return json.loads(raw_text)
+    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -299,10 +327,9 @@ def batch_enrich_books(ws, df):
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
         
-        # KI Call
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
         
-        # Wenn leer (Fehler/Limit), warten wir kurz und machen weiter
+        # Leere Ergebnisse ignorieren
         if not ai_res.get("tags") and not ai_res.get("year"):
             time.sleep(2)
             continue
@@ -324,19 +351,6 @@ def batch_enrich_books(ws, df):
     status_text.empty()
     progress_bar.empty()
     return count
-
-@st.cache_data(show_spinner=False)
-def get_ai_book_info(titel, autor):
-    prompt = f"""
-    Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
-    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
-    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
-    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
-    """
-    raw_text, err = call_gemini_direct(prompt)
-    if not raw_text: return {"teaser": f"KI pausiert ({err})", "bio": "-"}
-    try: return json.loads(raw_text)
-    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
 def smart_author(short, known):
     s = short.strip().lower()
