@@ -227,81 +227,47 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- DAS IST DER NEUE AUTOMATISCHE MODELL-TESTER ---
-@st.cache_data(show_spinner=False)
-def determine_best_model(api_key):
-    """Testet Modelle durch, bis eines klappt."""
-    
-    # LISTE DER KANDIDATEN (VON MODERN NACH ALT)
-    candidates = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-8b",
-        "gemini-1.5-pro",
-        "gemini-1.0-pro",
-        "gemini-pro"
-    ]
-    
-    test_url = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}"
-    headers = {'Content-Type': 'application/json'}
-    data = {"contents": [{"parts": [{"text": "Hello"}]}]}
-    
-    for model in candidates:
-        try:
-            # Wir machen einen echten Test-Call
-            url = test_url.format(model, api_key)
-            resp = requests.post(url, headers=headers, json=data)
-            
-            if resp.status_code == 200:
-                return model # GEFUNDEN!
-            elif resp.status_code == 429:
-                return model # Es existiert, ist nur gerade voll. Wir nehmen es trotzdem.
-                
-        except: continue
-        
-    return None # Keines gefunden
-
-# --- GENERISCHER KI AUFRUF ---
-def call_gemini_universal(prompt):
+# --- ROBUSTER KI AUFRUF (REST API - DIAGNOSE MODUS) ---
+def call_gemini_brute_force(prompt):
     if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
     api_key = st.secrets["gemini_api_key"]
     
-    # Hole das Modell aus dem Cache (oder teste es einmalig)
-    if "valid_model" not in st.session_state:
-        found_model = determine_best_model(api_key)
-        if found_model:
-            st.session_state.valid_model = found_model
-        else:
-            return None, "Kein funktionierendes Gemini-Modell für diesen Key gefunden."
-            
-    model_name = st.session_state.valid_model
+    # Wir probieren nur EINE Sache: Das Standard-Modell.
+    # Wenn das nicht geht, zeigen wir den Fehler.
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-    headers = {'Content-Type': 'application/json'}
-    data = {"contents": [{"parts": [{"text": prompt}]}]}
+    models_to_try = ["gemini-1.5-flash", "gemini-1.0-pro"]
     
-    # Retry Loop
-    for attempt in range(3):
+    last_error_msg = ""
+    
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
+        
         try:
             response = requests.post(url, headers=headers, json=data)
             
             if response.status_code == 200:
+                result = response.json()
                 try:
-                    res_json = response.json()
-                    text = res_json['candidates'][0]['content']['parts'][0]['text']
+                    text = result['candidates'][0]['content']['parts'][0]['text']
                     return text.replace("```json", "").replace("```", "").strip(), None
-                except: return None, "Format-Fehler"
-                
+                except: continue # Format-Fehler
+            
             elif response.status_code == 429:
-                if attempt < 2:
-                    time.sleep((attempt+1) * 5) # 5s, 10s Pause
-                    continue
-                else: return None, "Rate Limit (429)"
+                # Rate Limit -> Sofort abbrechen und User warnen (Warten bringt im Loop nichts)
+                return None, "Google-Limit erreicht (429). Bitte 1 Minute warten."
             
-            else: return None, f"Fehler {response.status_code} ({model_name})"
+            else:
+                # Echter Fehler -> Speichern und nächstes Modell probieren
+                last_error_msg = f"Fehler {response.status_code}: {response.text}"
+                continue 
+                
+        except Exception as e:
+            last_error_msg = f"Verbindung: {str(e)}"
+            continue
             
-        except Exception as e: return None, str(e)
-        
-    return None, "Timeout"
+    return None, f"Alle Versuche fehlgeschlagen. Letzter Fehler: {last_error_msg}"
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
@@ -312,8 +278,10 @@ def get_ai_tags_and_year(titel, autor):
     2. Gib mir das Erscheinungsjahr (YYYY).
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
-    raw_text, err = call_gemini_universal(prompt)
-    if not raw_text: return {"tags": "", "year": ""}
+    raw_text, err = call_gemini_brute_force(prompt)
+    if not raw_text: 
+        # Optional: Fehler ausgeben in Konsole/UI zur Diagnose
+        return {"tags": "", "year": ""}
     try: return json.loads(raw_text)
     except: return {"tags": "", "year": ""}
 
@@ -325,10 +293,10 @@ def get_ai_book_info(titel, autor):
     Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
     Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
     """
-    raw_text, err = call_gemini_universal(prompt)
-    if not raw_text: return {"teaser": f"Fehler: {err}", "bio": "-"}
+    raw_text, err = call_gemini_brute_force(prompt)
+    if not raw_text: return {"teaser": f"KI-Diagnose: {err}", "bio": "Bitte Screenshot von diesem Fehler machen."}
     try: return json.loads(raw_text)
-    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
+    except: return {"teaser": "Fehler beim Lesen der Antwort", "bio": "-"}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -349,8 +317,11 @@ def batch_enrich_books(ws, df):
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
         
+        # KI Call
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
         
+        # Check ob KI überhaupt antwortet
+        # Wir loggen hier nicht, da Batch sonst nervt
         if not ai_res.get("tags") and not ai_res.get("year"):
             time.sleep(2)
             continue
@@ -365,7 +336,7 @@ def batch_enrich_books(ws, df):
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        time.sleep(6.0) # Lange Pause
+        time.sleep(5.0) 
         
     status_text.success(f"Fertig! {count} Bücher aktualisiert.")
     time.sleep(2)
@@ -541,10 +512,6 @@ def main():
         st.write("🔧 **Einstellungen**")
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
-        
-        # ANZEIGE WELCHES MODELL GEFUNDEN WURDE
-        if "valid_model" in st.session_state:
-            st.success(f"✅ Verbunden: {st.session_state.valid_model}")
         
         st.markdown("---")
         st.write("🤖 **KI-Tools**")
