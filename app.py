@@ -56,7 +56,6 @@ st.markdown("""
         color: white !important;
     }
     
-    /* Feedback Widget (Sterne) etwas kompakter machen */
     .stFeedback {
         padding-top: 0px !important;
         padding-bottom: 5px !important;
@@ -205,9 +204,12 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     books_vals = ws_books.get_all_values()
     if not books_vals: return 0
     headers = [str(h).lower() for h in books_vals[0]]
-    try: idx_a = headers.index("autor")
+    try: 
+        idx_a = headers.index("autor")
+        idx_s = headers.index("status")
     except: return 0
     
+    # Clean Map bauen (Alle Bücher)
     raws = [deep_clean(row[idx_a]) for row in books_vals[1:] if len(row)>idx_a and row[idx_a]]
     clean_map = {}
     for r in raws: clean_map.setdefault(r.strip(), []).append(r)
@@ -235,9 +237,20 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
             new_data.append(nr)
         if changed: ws_books.update(new_data); books_vals = new_data 
 
-    final_authors = sorted(list({r[idx_a].strip() for r in books_vals[1:] if len(r)>idx_a and r[idx_a].strip()}))
+    # Autorenliste erstellen: NUR aus "Gelesen" (bzw. leeren Status = legacy Gelesen)
+    # Ignoriere "Wunschliste"
+    final_authors = set()
+    for row in books_vals[1:]:
+        if len(row) > idx_a and len(row) > idx_s:
+            status = row[idx_s].strip()
+            auth = row[idx_a].strip()
+            # Nur hinzufügen wenn Status NICHT Wunschliste ist
+            if auth and status != "Wunschliste":
+                final_authors.add(auth)
+
     ws_authors.clear(); ws_authors.update_cell(1,1,"Name")
-    if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in final_authors])
+    if final_authors: 
+        ws_authors.update(values=[["Name"]] + [[a] for a in sorted(list(final_authors))])
     return 1
 
 # --- MAIN ---
@@ -256,7 +269,9 @@ def main():
         with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
     
     df = st.session_state.df_books
-    authors = list(set([a for a in df["Autor"] if a]))
+    
+    # Autorenliste für Autocomplete NUR aus Gelesenen Büchern
+    authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
     nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"], horizontal=True, label_visibility="collapsed")
     
@@ -343,59 +358,21 @@ def main():
             cols = st.columns(3) 
             for i, (idx, row) in enumerate(df_show.iterrows()):
                 with cols[i % 3]:
-                    # NATIVE CONTAINER
                     with st.container(border=True):
                         c_img, c_info = st.columns([1, 2])
-                        
-                        # --- LINKS: Bild & Klickbare Sterne ---
                         with c_img:
                             cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
                             st.image(cov, use_container_width=True)
-                            
-                            # INTERAKTIVE BEWERTUNG
-                            try: stars_current = int(row["Bewertung"])
-                            except: stars_current = 0
-                            
-                            # Feedback widget returns index (0=1 Star, 4=5 Stars)
-                            default_idx = stars_current - 1 if stars_current > 0 else None
-                            
-                            new_rating_idx = st.feedback(
-                                "stars", 
-                                key=f"star_widget_{idx}",
-                                disabled=False 
-                            )
-                            
-                            # Initiale Anzeige setzen (Trick, da default_value im feedback buggy sein kann bei Reruns)
-                            # Wir prüfen, ob User geklickt hat (session_state hat den Wert)
-                            # Wenn nicht, ist es None.
-                            
-                            # Wenn User klickt, wird reloaded. Wir vergleichen session state mit DB wert.
-                            widget_key = f"star_widget_{idx}"
-                            if widget_key in st.session_state and st.session_state[widget_key] is not None:
-                                user_val = st.session_state[widget_key] + 1
-                                if user_val != stars_current:
-                                    # Auto-Save Rating
-                                    update_single_entry(ws_books, row["Titel"], "Bewertung", user_val)
-                                    st.toast(f"Bewertung für '{row['Titel']}' gespeichert!")
-                                    del st.session_state.df_books
-                                    time.sleep(0.5)
-                                    st.rerun()
+                            try: stars = int(row["Bewertung"])
+                            except: stars = 0
+                            st.markdown(f"<div style='text-align:center; color:#d35400; font-size:1.2em;'>{'★'*stars}<span style='color:#ccc;'>{'★'*(5-stars)}</span></div>", unsafe_allow_html=True)
 
-                        # --- RECHTS: Titel & Direktes Notiz-Feld ---
                         with c_info:
                             st.subheader(row["Titel"])
                             st.caption(row["Autor"])
                             
-                            # Auto-Save Notiz Input
                             current_note = row["Notiz"]
-                            new_note = st.text_area(
-                                "Notiz", 
-                                value=current_note, 
-                                key=f"note_area_{idx}", 
-                                label_visibility="collapsed",
-                                height=80, 
-                                placeholder="Notiz hier tippen..."
-                            )
+                            new_note = st.text_area("Notiz", value=current_note, key=f"note_area_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz hier tippen...")
                             
                             if new_note != current_note:
                                 update_single_entry(ws_books, row["Titel"], "Notiz", new_note)
@@ -406,42 +383,83 @@ def main():
 
     # --- TAB: MERKLISTE ---
     elif nav == "🔮 Merkliste":
-        st.header("Wunschliste")
-        with st.form("wish_form", clear_on_submit=True):
-            i_w = st.text_input("Titel, Autor")
-            n_w = st.text_input("Notiz")
-            if st.form_submit_button("Auf Merkliste"):
-                if "," in i_w:
-                    t, a = [x.strip() for x in i_w.split(",",1)]
-                    c, g = fetch_meta(t, a)
-                    ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), n_w, "Wunschliste"])
-                    cleanup_author_duplicates_batch(ws_books, ws_authors)
-                    del st.session_state.df_books; st.rerun()
+        c_h, c_v = st.columns([3, 1])
+        with c_h: st.header("Wunschliste")
+        with c_v: w_view = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed", key="w_view")
+
+        with st.expander("➕ Neuen Wunsch hinzufügen", expanded=False):
+            with st.form("wish_form", clear_on_submit=True):
+                i_w = st.text_input("Titel, Autor")
+                n_w = st.text_input("Notiz")
+                if st.form_submit_button("Auf Merkliste"):
+                    if "," in i_w:
+                        t, a = [x.strip() for x in i_w.split(",",1)]
+                        c, g = fetch_meta(t, a)
+                        ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), n_w, "Wunschliste"])
+                        cleanup_author_duplicates_batch(ws_books, ws_authors)
+                        del st.session_state.df_books; st.rerun()
+                    else: st.error("Bitte Titel, Autor eingeben.")
         
         df_w = st.session_state.df_books[st.session_state.df_books["Status"]=="Wunschliste"].copy()
+        
         if not df_w.empty:
-            for i, r in df_w.iterrows():
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([1,4,1])
-                    if r["Cover"]!="-": c1.image(r["Cover"], width=60)
-                    else: c1.write("📚")
-                    with c2:
-                        st.subheader(r["Titel"])
-                        st.write(f"{r['Autor']}")
-                        st.text_area("Notiz", value=r["Notiz"], disabled=True, height=68, label_visibility="collapsed")
-                    if c3.button("✅ Gelesen", key=f"w_{i}"):
-                        cell = ws_books.find(r["Titel"])
-                        ws_books.update_cell(cell.row, 8, "Gelesen")
-                        ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
-                        del st.session_state.df_books; st.rerun()
+            # --- MERKLISTE: KACHELANSICHT ---
+            if w_view == "Kacheln":
+                cols = st.columns(3)
+                for i, (idx, row) in enumerate(df_w.iterrows()):
+                    with cols[i % 3]:
+                        with st.container(border=True):
+                            c_img, c_info = st.columns([1, 2])
+                            with c_img:
+                                cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
+                                st.image(cov, use_container_width=True)
+                                # Button unter Bild
+                                if st.button("✅ Gelesen", key=f"wk_{idx}", use_container_width=True):
+                                    cell = ws_books.find(row["Titel"])
+                                    ws_books.update_cell(cell.row, 8, "Gelesen")
+                                    ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
+                                    del st.session_state.df_books; st.rerun()
+
+                            with c_info:
+                                st.subheader(row["Titel"])
+                                st.caption(row["Autor"])
+                                
+                                # Editierbare Notiz
+                                current_n = row["Notiz"]
+                                new_n = st.text_area("Notiz", value=current_n, key=f"wnote_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz...")
+                                if new_n != current_n:
+                                    update_single_entry(ws_books, row["Titel"], "Notiz", new_n)
+                                    st.toast("Notiz gespeichert!")
+                                    del st.session_state.df_books
+                                    time.sleep(0.5); st.rerun()
+
+            # --- MERKLISTE: LISTENANSICHT (Alter Style) ---
+            else:
+                for i, r in df_w.iterrows():
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([1,4,1])
+                        if r["Cover"]!="-": c1.image(r["Cover"], width=60)
+                        else: c1.write("📚")
+                        with c2:
+                            st.subheader(r["Titel"])
+                            st.write(f"{r['Autor']} | 📝 {r['Notiz']}")
+                        if c3.button("✅ Gelesen", key=f"w_{i}"):
+                            cell = ws_books.find(r["Titel"])
+                            ws_books.update_cell(cell.row, 8, "Gelesen")
+                            ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
+                            del st.session_state.df_books; st.rerun()
         else: st.info("Merkliste leer.")
 
     # --- TAB: AUTOREN ---
     elif nav == "👥 Autoren":
-        st.header("Autoren")
+        st.header("Autoren Statistik")
         df = st.session_state.df_books
-        if not df.empty:
-            auth_counts = df["Autor"].value_counts().reset_index()
+        
+        # FILTER: Nur gelesene Bücher zählen!
+        df_read = df[df["Status"] != "Wunschliste"]
+        
+        if not df_read.empty:
+            auth_counts = df_read["Autor"].value_counts().reset_index()
             auth_counts.columns = ["Autor", "Anzahl Bücher"]
             st.dataframe(auth_counts, use_container_width=True, hide_index=True)
 
