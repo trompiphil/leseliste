@@ -14,12 +14,27 @@ st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide
 # --- KONSTANTEN ---
 NO_COVER_MARKER = "-" 
 
-# --- DESIGN ---
+# --- DESIGN (High Contrast Fix) ---
 st.markdown("""
     <style>
-    .stApp { background-color: #f5f5dc; }
-    .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
+    /* 1. Hintergrund erzwingen */
+    .stApp { 
+        background-color: #f5f5dc; 
+    }
     
+    /* 2. Textfarben GLOBAL auf Dunkelbraun erzwingen (überschreibt Darkmode) */
+    .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, h5, h6, span, th, td, li { 
+        color: #4a3b2a !important; 
+    }
+    
+    /* 3. Eingabefelder lesbar machen */
+    .stTextInput input, .stTextArea textarea {
+        background-color: #fffaf0 !important;
+        border: 2px solid #d35400 !important;
+        color: #2c3e50 !important; /* Dunkelblau für Eingabetext */
+    }
+    
+    /* 4. Buttons */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -32,7 +47,7 @@ st.markdown("""
         margin-top: 10px;
     }
 
-    /* Kacheln Design */
+    /* 5. Kacheln Design */
     .book-card {
         background-color: #eaddcf;
         border: 1px solid #d35400;
@@ -47,17 +62,21 @@ st.markdown("""
         border-radius: 5px;
         margin-bottom: 10px;
     }
+    /* Spezifische Farben für Kacheln */
     .book-title {
         font-weight: bold;
         font-size: 1.1em;
         margin-bottom: 5px;
+        color: #2c3e50 !important; 
     }
     .book-author {
         font-style: italic;
         margin-bottom: 10px;
         font-size: 0.9em;
+        color: #4a3b2a !important;
     }
 
+    /* 6. Navigation Tabs */
     div[role="radiogroup"] {
         display: flex;
         flex-direction: row;
@@ -74,14 +93,16 @@ st.markdown("""
         text-align: center;
         justify-content: center;
         font-weight: bold;
-        color: #4a3b2a;
+        color: #4a3b2a !important;
     }
-
-    .stTextInput input, .stTextArea textarea {
-        background-color: #fffaf0 !important;
-        border: 2px solid #d35400 !important;
-        color: #2c3e50 !important;
-        font-size: 16px !important;
+    div[role="radiogroup"] label[data-checked="true"] {
+        background-color: #d35400 !important;
+        color: white !important;
+    }
+    
+    /* Expander Text fixen */
+    .streamlit-expanderHeader {
+        color: #4a3b2a !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -113,17 +134,23 @@ def setup_sheets(client):
     return ws_books, ws_authors
 
 def check_and_update_structure(ws):
-    """Prüft, ob die neuen Spalten da sind, und legt sie an, falls nicht."""
+    """Legt fehlende Spalten (Notiz, Status...) automatisch an."""
     try:
         current_headers = ws.row_values(1)
-        needed_headers = ["Hinzugefügt", "Notiz", "Status"]
+        # Wenn Tabelle ganz leer ist, initialisieren
+        if not current_headers:
+            ws.update_cell(1, 1, "Titel")
+            current_headers = ["Titel"]
+            
+        needed_headers = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status"]
+        
+        # Finde nächste freie Spalte
         next_col = len(current_headers) + 1
         
         for header in needed_headers:
             exists = any(h.lower() == header.lower() for h in current_headers)
             if not exists:
                 ws.update_cell(1, next_col, header)
-                # st.toast(f"🔧 Habe Spalte '{header}' angelegt!", icon="🏗️")
                 next_col += 1
                 time.sleep(0.5)
     except Exception as e:
@@ -133,15 +160,10 @@ def fetch_data_from_sheet(worksheet):
     try:
         all_values = worksheet.get_all_values()
         
-        # --- SICHERHEITS-FIX ---
-        # Wenn die Tabelle leer ist (nur Header oder gar nichts),
-        # geben wir ein leeres DataFrame mit ALLEN möglichen Spalten zurück.
-        # Das verhindert den KeyError "Name" bei frischen Tabellen.
+        # Crash-Schutz: Wenn Tabelle leer, gib leeres Gerüst zurück
+        default_cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Name"]
         if len(all_values) < 2: 
-            return pd.DataFrame(columns=[
-                "Titel", "Autor", "Cover", "Bewertung", 
-                "Genre", "Name", "Hinzugefügt", "Notiz", "Status"
-            ])
+            return pd.DataFrame(columns=default_cols)
         
         headers = [str(h).strip().lower() for h in all_values[0]]
         col_map = {}
@@ -158,32 +180,24 @@ def fetch_data_from_sheet(worksheet):
 
         rows = []
         for raw_row in all_values[1:]:
-            entry = {
-                "Titel": "", "Autor": "", "Cover": "", "Bewertung": "", 
-                "Genre": "", "Name": "", "Hinzugefügt": "", "Notiz": "", "Status": "Gelesen"
-            }
+            entry = {col: "" for col in default_cols} # Standardwerte leer
+            entry["Status"] = "Gelesen" # Default Status
+            
             for key, idx in col_map.items():
                 if idx < len(raw_row):
                     entry[key] = raw_row[idx]
             
+            # Fallback für leeren Status bei alten Einträgen
             if not entry["Status"]: entry["Status"] = "Gelesen"
             
             if entry["Titel"] or entry["Name"]:
                 rows.append(entry)
         
-        # Falls trotz Daten keine Zeilen erkannt wurden (selten), leeres DF mit Spalten
-        if not rows:
-             return pd.DataFrame(columns=[
-                "Titel", "Autor", "Cover", "Bewertung", 
-                "Genre", "Name", "Hinzugefügt", "Notiz", "Status"
-            ])
-
+        if not rows: return pd.DataFrame(columns=default_cols)
         return pd.DataFrame(rows)
+        
     except Exception as e: 
-        return pd.DataFrame(columns=[
-                "Titel", "Autor", "Cover", "Bewertung", 
-                "Genre", "Name", "Hinzugefügt", "Notiz", "Status"
-            ])
+        return pd.DataFrame(columns=["Titel", "Autor", "Status"]) # Notfall-Return
 
 def force_reload():
     if "df_books" in st.session_state: del st.session_state.df_books
@@ -196,19 +210,17 @@ def sync_authors(ws_books, ws_authors):
     if "df_authors" not in st.session_state: st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
     df_b = st.session_state.df_books
     df_a = st.session_state.df_authors
-    if df_b.empty: return 0
     
-    # Sicherstellen, dass Spalten existieren
-    if "Autor" not in df_b.columns: return 0
-    if "Name" not in df_a.columns: 
-        existing_authors = set()
-    else:
-        existing_authors = set([a.strip() for a in df_a["Name"].tolist() if str(a).strip()])
-
+    if df_b.empty or "Autor" not in df_b.columns: return 0
+    
+    existing = set()
+    if "Name" in df_a.columns:
+        existing = set([a.strip() for a in df_a["Name"].tolist() if str(a).strip()])
+    
     book_authors = set([a.strip() for a in df_b["Autor"].tolist() if str(a).strip()])
-    
-    missing = list(book_authors - existing_authors)
+    missing = list(book_authors - existing)
     missing.sort()
+    
     if missing:
         ws_authors.append_rows([[name] for name in missing])
         st.session_state.sync_done = True
@@ -308,9 +320,9 @@ def main():
 
     client = get_connection()
     if not client: st.error("Verbindung fehlt!"); st.stop()
-    
     ws_books, ws_authors = setup_sheets(client)
 
+    # Automatisch prüfen und Spalten anlegen (Notiz, Status etc.)
     if "structure_checked" not in st.session_state:
         check_and_update_structure(ws_books)
         st.session_state.structure_checked = True
@@ -321,15 +333,12 @@ def main():
 
     sync_authors(ws_books, ws_authors)
     
-    # Hier war der Fehler: Wenn df_authors leer war, gab es KeyError "Name"
-    # Jetzt ist sichergestellt, dass "Name" existiert (durch fetch_data_from_sheet Anpassung)
+    known_authors = []
     if "Name" in st.session_state.df_authors.columns:
         known_authors = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
-    else:
-        known_authors = []
 
-    # NAVIGATION
-    nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔮 Merkliste", "👥 Autoren", "🔍 Sammlung"], horizontal=True, label_visibility="collapsed")
+    # --- NAVIGATION SORTIERT ---
+    nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"], horizontal=True, label_visibility="collapsed")
     
     # --- TAB: NEU (GELESEN) ---
     if nav == "✍️ Neu (Gelesen)":
@@ -351,10 +360,67 @@ def main():
                     st.success(f"Gelesen: {tit}"); st.balloons(); time.sleep(1); st.session_state.input_key += 1; st.rerun()
                 else: st.error("Komma fehlt!")
 
+    # --- TAB: SAMMLUNG ---
+    elif nav == "🔍 Sammlung":
+        c_head, c_view = st.columns([3, 1])
+        with c_head: st.header("Meine gelesenen Bücher")
+        with c_view: 
+            view_mode = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed")
+
+        df = st.session_state.df_books.copy()
+        if "Status" not in df.columns: df["Status"] = "Gelesen"
+        df = df[ (df["Status"] == "Gelesen") | (df["Status"] == "") ]
+        
+        if not df.empty:
+            if "Hinzugefügt" in df.columns:
+                df["Hinzugefügt"] = pd.to_datetime(df["Hinzugefügt"], errors='coerce')
+                df = df.sort_values(by="Hinzugefügt", ascending=False)
+            
+            search = st.text_input("🔍 Suchen:", placeholder="Titel, Autor, Jahr...")
+            if search:
+                s = search.lower().strip()
+                df = df[df["Titel"].str.lower().str.contains(s) | df["Autor"].str.lower().str.contains(s)]
+            
+            if view_mode == "Liste":
+                edited = st.data_editor(
+                    df,
+                    column_order=["Cover", "Titel", "Autor", "Bewertung", "Hinzugefügt", "Notiz"],
+                    column_config={
+                        "Cover": st.column_config.ImageColumn("Bild", width="small"),
+                        "Titel": st.column_config.TextColumn(disabled=True),
+                        "Autor": st.column_config.TextColumn(disabled=True),
+                        "Bewertung": st.column_config.NumberColumn(disabled=True),
+                        "Hinzugefügt": st.column_config.DateColumn("Datum", format="DD.MM.YYYY", disabled=True),
+                        "Notiz": st.column_config.TextColumn("Meine Notizen", width="medium")
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    key="editor_list"
+                )
+                st.caption("*Notizen-Bearbeitung hier deaktiviert.*")
+            else: 
+                cols = st.columns(3)
+                for i, (idx, row) in enumerate(df.iterrows()):
+                    with cols[i % 3]:
+                        with st.container(border=True):
+                            cov = row["Cover"] if row["Cover"] and row["Cover"] != "-" else "https://via.placeholder.com/100x150?text=Buch"
+                            st.markdown(f"""
+                            <div class="book-card">
+                                <img src="{cov}" style="width:80px">
+                                <div class="book-title">{row['Titel']}</div>
+                                <div class="book-author">{row['Autor']}</div>
+                                <div>{'⭐' * int(row['Bewertung'] if row['Bewertung'] else 0)}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            with st.expander("📝 Notiz"):
+                                st.write(row["Notiz"] if row["Notiz"] else "Keine Notiz")
+                                if "Hinzugefügt" in row and pd.notnull(row['Hinzugefügt']):
+                                    st.caption(f"📅 {row['Hinzugefügt'].strftime('%d.%m.%Y')}")
+        else: st.info("Noch keine Bücher gelesen.")
+
     # --- TAB: MERKLISTE ---
     elif nav == "🔮 Merkliste":
         st.header("🔮 Merkliste / Lesevorschläge")
-        
         with st.expander("➕ Neuer Wunschtitel"):
             with st.form("new_wish"):
                 inp_w = st.text_input("Titel, Autor")
@@ -393,70 +459,8 @@ def main():
                                     ws_books.update_cell(cell.row, status_col_idx, "Gelesen")
                                     del st.session_state.df_books
                                     st.success("Verschoben zu Gelesen!"); st.rerun()
-                                except: st.error("Konnte Status-Spalte nicht finden.")
-
-    # --- TAB: SAMMLUNG ---
-    elif nav == "🔍 Sammlung":
-        c_head, c_view = st.columns([3, 1])
-        with c_head: st.header("Meine gelesenen Bücher")
-        with c_view: 
-            view_mode = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed")
-
-        df = st.session_state.df_books.copy()
-        
-        # Sicherstellen, dass Status da ist
-        if "Status" not in df.columns: df["Status"] = "Gelesen"
-        
-        df = df[ (df["Status"] == "Gelesen") | (df["Status"] == "") ]
-        
-        if not df.empty:
-            if "Hinzugefügt" in df.columns:
-                df["Hinzugefügt"] = pd.to_datetime(df["Hinzugefügt"], errors='coerce')
-                df = df.sort_values(by="Hinzugefügt", ascending=False)
-            
-            search = st.text_input("🔍 Suchen:", placeholder="Titel, Autor, Jahr...")
-            if search:
-                s = search.lower().strip()
-                df = df[df["Titel"].str.lower().str.contains(s) | df["Autor"].str.lower().str.contains(s)]
-            
-            if view_mode == "Liste":
-                edited = st.data_editor(
-                    df,
-                    column_order=["Cover", "Titel", "Autor", "Bewertung", "Hinzugefügt", "Notiz"],
-                    column_config={
-                        "Cover": st.column_config.ImageColumn("Bild", width="small"),
-                        "Titel": st.column_config.TextColumn(disabled=True),
-                        "Autor": st.column_config.TextColumn(disabled=True),
-                        "Bewertung": st.column_config.NumberColumn(disabled=True),
-                        "Hinzugefügt": st.column_config.DateColumn("Datum", format="DD.MM.YYYY", disabled=True),
-                        "Notiz": st.column_config.TextColumn("Meine Notizen", width="medium")
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key="editor_list"
-                )
-                st.caption("*Notizen-Bearbeitung hier deaktiviert.*")
-
-            else: 
-                cols = st.columns(3)
-                for i, (idx, row) in enumerate(df.iterrows()):
-                    with cols[i % 3]:
-                        with st.container(border=True):
-                            cov = row["Cover"] if row["Cover"] and row["Cover"] != "-" else "https://via.placeholder.com/100x150?text=Buch"
-                            st.markdown(f"""
-                            <div class="book-card">
-                                <img src="{cov}" style="width:80px">
-                                <div class="book-title">{row['Titel']}</div>
-                                <div class="book-author">{row['Autor']}</div>
-                                <div>{'⭐' * int(row['Bewertung'] if row['Bewertung'] else 0)}</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            with st.expander("📝 Notiz"):
-                                st.write(row["Notiz"] if row["Notiz"] else "Keine Notiz")
-                                if "Hinzugefügt" in row and pd.notnull(row['Hinzugefügt']):
-                                    st.caption(f"📅 {row['Hinzugefügt'].strftime('%d.%m.%Y')}")
-
-        else: st.info("Noch keine Bücher gelesen.")
+                                except: st.error("Fehler beim Verschieben.")
+            else: st.info("Merkliste ist leer.")
 
     # --- TAB: AUTOREN ---
     elif nav == "👥 Autoren":
