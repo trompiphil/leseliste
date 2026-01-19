@@ -8,6 +8,7 @@ import urllib.parse
 from datetime import datetime
 from deep_translator import GoogleTranslator
 import google.generativeai as genai
+import json
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide")
@@ -211,45 +212,60 @@ def fetch_meta(titel, autor):
 
 @st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
-    """Fragt Google Gemini - Mit automatischer Modell-Erkennung"""
+    """Dynamische Modellauswahl: Wir nehmen das, was da ist."""
     if "gemini_api_key" not in st.secrets:
         return {"teaser": "Fehler: 'gemini_api_key' fehlt in Secrets.", "bio": "-"}
     
-    genai.configure(api_key=st.secrets["gemini_api_key"])
-    
-    prompt = f"""
-    Du bist ein literarischer Assistent.
-    Buch: "{titel}" von {autor}.
-    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
-    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
-    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
-    """
-
-    # Strategie: Wir probieren Modelle durch, bis eines klappt
-    models_to_try = ['gemini-1.5-flash', 'gemini-pro', 'gemini-1.0-pro']
-    
-    last_error = ""
-    
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name) 
-            response = model.generate_content(prompt)
-            text = response.text.replace("```json", "").replace("```", "").strip()
-            import json
-            return json.loads(text)
-        except Exception as e:
-            last_error = str(e)
-            continue # Nächstes Modell probieren
-            
-    # Wenn wir hier sind, haben alle versagt -> Wir listen auf, was möglich ist
     try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        return {
-            "teaser": f"Kein Modell funktionierte. Letzter Fehler: {last_error}", 
-            "bio": f"Verfügbare Modelle laut API: {available_models}"
-        }
-    except:
-        return {"teaser": f"Totalausfall: {last_error}", "bio": "API Key prüfen."}
+        genai.configure(api_key=st.secrets["gemini_api_key"])
+        
+        # 1. Hole Liste aller verfügbaren Modelle
+        all_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                all_models.append(m.name)
+        
+        if not all_models:
+            return {"teaser": "Keine KI-Modelle verfügbar.", "bio": "-"}
+
+        # 2. Wähle das Beste aus (Priorität: Flash -> Pro -> Irgendwas)
+        selected_model_name = None
+        
+        # Suche nach 'flash'
+        for m in all_models:
+            if "flash" in m and "1.5" in m:
+                selected_model_name = m
+                break
+        
+        # Wenn kein Flash, suche nach 'pro'
+        if not selected_model_name:
+            for m in all_models:
+                if "pro" in m and "1.5" in m:
+                    selected_model_name = m
+                    break
+        
+        # Wenn immer noch nix, nimm einfach das erste in der Liste
+        if not selected_model_name:
+            selected_model_name = all_models[0]
+
+        # 3. Generiere Inhalt mit dem gefundenen Modellnamen
+        model = genai.GenerativeModel(selected_model_name)
+        
+        prompt = f"""
+        Du bist ein literarischer Assistent.
+        Buch: "{titel}" von {autor}.
+        
+        Aufgabe 1: Schreibe einen spannenden Teaser über den Inhalt (max 80 Wörter). Keine Spoiler!
+        Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
+        
+        Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
+        """
+        response = model.generate_content(prompt)
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+        
+    except Exception as e:
+        return {"teaser": f"KI-Fehler: {str(e)}", "bio": f"Genutztes Modell war: {selected_model_name if 'selected_model_name' in locals() else 'Unbekannt'}"}
 
 def smart_author(short, known):
     s = short.strip().lower()
