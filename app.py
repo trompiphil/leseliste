@@ -35,7 +35,6 @@ st.markdown("""
         background-color: #e67e22 !important;
     }
 
-    /* Container Styling */
     [data-testid="stVerticalBlockBorderWrapper"] > div {
         background-color: #eaddcf;
         border-radius: 12px;
@@ -44,7 +43,6 @@ st.markdown("""
         padding: 10px;
     }
 
-    /* --- TABS & MOBILE --- */
     .stTabs [data-baseweb="tab-list"] {
         gap: 10px;
         background-color: transparent;
@@ -91,7 +89,6 @@ st.markdown("""
     }
     a.external-link:hover { text-decoration: underline; }
     
-    /* Box für AI Content */
     .ai-box {
         background-color: #fff8e1;
         border-left: 4px solid #d35400;
@@ -171,7 +168,6 @@ def update_full_dataframe(ws, new_df):
     headers = [str(h).lower() for h in current_data[0]]
     col_idx = {k: headers.index(k) for k in ["titel","autor","bewertung","notiz","status"] if k in headers}
     if not col_idx: return False
-    
     rows_to_delete = [] 
     for index, row in new_df.iterrows():
         titel = row["Titel"]
@@ -213,37 +209,38 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g
 
-# --- NEU: GEMINI AI ---
 @st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
     """Fragt Google Gemini nach einer Zusammenfassung und Bio"""
+    # 1. Check ob Key existiert
     if "gemini_api_key" not in st.secrets:
-        return None
+        return {"teaser": "Fehler: 'gemini_api_key' fehlt in Secrets.", "bio": "-"}
     
     try:
+        # 2. Konfiguration
         genai.configure(api_key=st.secrets["gemini_api_key"])
-        model = genai.GenerativeModel('gemini-1.5-flash') # Schnelles Modell
+        model = genai.GenerativeModel('gemini-1.5-flash') 
         
+        # 3. Prompt senden
         prompt = f"""
         Du bist ein literarischer Assistent.
         Buch: "{titel}" von {autor}.
         
-        Aufgabe 1: Schreibe einen spannenden Teaser/Zusammenfassung über den Inhalt (max 80 Wörter). Keine Spoiler!
+        Aufgabe 1: Schreibe einen spannenden Teaser über den Inhalt (max 80 Wörter). Keine Spoiler!
         Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
         
-        Antworte im JSON Format:
-        {{
-            "teaser": "Hier der Teaser...",
-            "bio": "Hier die Bio..."
-        }}
+        Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
         """
         response = model.generate_content(prompt)
-        # Simple JSON extraction (falls Modell Markdown drumrum packt)
+        
+        # 4. JSON parsen (Clean)
         text = response.text.replace("```json", "").replace("```", "").strip()
         import json
         return json.loads(text)
+        
     except Exception as e:
-        return {"teaser": "KI konnte keine Infos laden.", "bio": "Keine Bio verfügbar."}
+        # 5. Echten Fehler zurückgeben für Debugging
+        return {"teaser": f"KI-Fehler: {str(e)}", "bio": "Bitte Key prüfen."}
 
 def smart_author(short, known):
     s = short.strip().lower()
@@ -259,11 +256,9 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     headers = [str(h).lower() for h in books_vals[0]]
     try: idx_a, idx_s = headers.index("autor"), headers.index("status")
     except: return 0
-    
     raws = [deep_clean(row[idx_a]) for row in books_vals[1:] if len(row)>idx_a and row[idx_a]]
     clean_map = {}
     for r in raws: clean_map.setdefault(r.strip(), []).append(r)
-    
     replacements = {}
     for clean, versions in clean_map.items():
         if len(set(versions))>1: 
@@ -273,7 +268,6 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
         for short in keys[i+1:]:
             if short.lower() in long.lower() and short.lower() != long.lower():
                 for v in clean_map.get(short, []): replacements[v] = clean_map[long][0]
-    
     if replacements:
         new_data = [books_vals[0]]
         changed = False
@@ -286,14 +280,12 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
                 elif nr[idx_a] != orig: nr[idx_a] = orig; changed = True
             new_data.append(nr)
         if changed: ws_books.update(new_data); books_vals = new_data 
-
     final_authors = set()
     for row in books_vals[1:]:
         if len(row) > idx_a and len(row) > idx_s:
             status = row[idx_s].strip()
             auth = row[idx_a].strip()
             if auth and status != "Wunschliste": final_authors.add(auth)
-
     ws_authors.clear(); ws_authors.update_cell(1,1,"Name")
     if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in sorted(list(final_authors))])
     return 1
@@ -311,6 +303,11 @@ def close_detail_view():
 def main():
     if "selected_book" not in st.session_state: st.session_state.selected_book = None
 
+    with st.sidebar:
+        st.write("🔧 **Einstellungen**")
+        if st.button("🔄 Cache leeren", help="Klicken, wenn Daten hängen"): 
+            st.session_state.clear(); st.rerun()
+        
     st.title("📚 Meine Bibliothek")
     
     client = get_connection()
@@ -339,37 +336,33 @@ def main():
         
         with col1:
             cov = book["Cover"] if book["Cover"] != "-" else "https://via.placeholder.com/200x300?text=No+Cover"
-            # Bild noch etwas größer/schöner
             st.markdown(f'<img src="{cov}" style="width:100%; max-width:220px; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.3); margin-bottom:20px;">', unsafe_allow_html=True)
-            
             st.info(f"**Deine Bewertung:**\n\n{'★' * int(book['Bewertung'])}")
-            
-            # Notiz nur anzeigen, wenn vorhanden
             if book["Notiz"]:
                 st.markdown("#### 📝 Deine Notiz")
                 st.write(f"*{book['Notiz']}*")
             
         with col2:
-            # KI GENERIERUNG
+            # KI GENERIERUNG STARTEN
             ai_data = None
             if "gemini_api_key" in st.secrets:
                 with st.spinner("✨ Die KI liest das Buch gerade quer..."):
                     ai_data = get_ai_book_info(book["Titel"], book["Autor"])
             else:
-                st.warning("⚠️ Kein KI-Schlüssel gefunden. Füge 'gemini_api_key' in die Secrets ein für Zusammenfassungen.")
+                st.warning("⚠️ Kein KI-Schlüssel gefunden.")
 
             if ai_data:
                 st.markdown(f"""
                 <div class="ai-box">
                     <h4>📖 Worum geht's?</h4>
-                    <p>{ai_data['teaser']}</p>
+                    <p>{ai_data.get('teaser', 'Fehler beim Laden')}</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 st.markdown(f"""
                 <div class="ai-box" style="border-left-color: #2980b9; background-color: #eaf2f8;">
                     <h4>👤 Über den Autor</h4>
-                    <p>{ai_data['bio']}</p>
+                    <p>{ai_data.get('bio', '-')}</p>
                 </div>
                 """, unsafe_allow_html=True)
             
