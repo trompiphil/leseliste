@@ -7,7 +7,6 @@ import time
 import urllib.parse
 from datetime import datetime
 from deep_translator import GoogleTranslator
-import google.generativeai as genai
 import json
 
 # --- KONFIGURATION ---
@@ -228,22 +227,42 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- DIESE FUNKTION RUFT DIE KI SICHER AUF ---
-def safe_generate(prompt):
+# --- NEUER KI-AUFRUF: DIREKT VIA REST API (KEINE BIBLIOTHEK MEHR) ---
+def call_gemini_direct(prompt):
+    """Ruft die Gemini API direkt via HTTP auf - bypasses library issues"""
     if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
     
-    genai.configure(api_key=st.secrets["gemini_api_key"])
+    api_key = st.secrets["gemini_api_key"]
+    # URL für Flash 1.5
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
-    # HARDCODED: Wir nehmen NUR das stabile Flash-Modell
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
     
     try:
-        response = model.generate_content(prompt)
-        return response.text.replace("```json", "").replace("```", "").strip(), None
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            result = response.json()
+            try:
+                # Extrahiere Text aus der verschachtelten JSON Antwort
+                text = result['candidates'][0]['content']['parts'][0]['text']
+                # Clean JSON markdown if present
+                clean_text = text.replace("```json", "").replace("```", "").strip()
+                return clean_text, None
+            except:
+                return None, "Ungültiges Antwortformat von Google"
+        elif response.status_code == 429:
+            return None, "429: Rate Limit"
+        else:
+            return None, f"Fehler {response.status_code}: {response.text}"
+            
     except Exception as e:
-        err = str(e)
-        if "429" in err: return None, "Rate Limit (Warte kurz)"
-        return None, f"Fehler: {err}"
+        return None, f"Verbindungsfehler: {str(e)}"
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
@@ -255,24 +274,11 @@ def get_ai_tags_and_year(titel, autor):
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
     
-    raw_text, err = safe_generate(prompt)
+    raw_text, err = call_gemini_direct(prompt)
     if not raw_text: return {"tags": "", "year": ""}
     
     try: return json.loads(raw_text)
     except: return {"tags": "", "year": ""}
-
-@st.cache_data(show_spinner=False)
-def get_ai_book_info(titel, autor):
-    prompt = f"""
-    Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
-    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
-    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
-    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
-    """
-    text, err = safe_generate(prompt)
-    if not text: return {"teaser": f"KI pausiert ({err})", "bio": "-"}
-    try: return json.loads(text)
-    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -311,7 +317,6 @@ def batch_enrich_books(ws, df):
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        # 5 Sekunden Pause = 12 Anfragen pro Minute (Limit ist 15)
         time.sleep(5.0) 
         
     status_text.success(f"Fertig! {count} Bücher aktualisiert.")
@@ -319,6 +324,19 @@ def batch_enrich_books(ws, df):
     status_text.empty()
     progress_bar.empty()
     return count
+
+@st.cache_data(show_spinner=False)
+def get_ai_book_info(titel, autor):
+    prompt = f"""
+    Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
+    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
+    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
+    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
+    """
+    raw_text, err = call_gemini_direct(prompt)
+    if not raw_text: return {"teaser": f"KI pausiert ({err})", "bio": "-"}
+    try: return json.loads(raw_text)
+    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
 def smart_author(short, known):
     s = short.strip().lower()
@@ -518,7 +536,7 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Lade Metadaten (inkl. Jahr & Tags)..."):
                         c, g, y = fetch_meta(t, fa)
-                        # KI Tags (hier auch sicher aufrufen)
+                        # KI Tags (REST API)
                         ai_res = get_ai_tags_and_year(t, fa)
                         tags = ai_res["tags"] if ai_res else ""
                         if not y and ai_res: y = ai_res["year"]
