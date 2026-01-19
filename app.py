@@ -227,69 +227,49 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- DETEKTIV: WELCHES MODELL GEHT? ---
-@st.cache_data(show_spinner=False)
-def find_best_available_model(api_key):
-    """Fragt Google, welche Modelle da sind und nimmt das erste brauchbare."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        r = requests.get(url)
-        if r.status_code != 200:
-            return None, f"Fehler beim Abrufen der Modelle: {r.status_code} {r.text}"
-        
-        data = r.json()
-        # Suche Modelle, die 'generateContent' können
-        candidates = []
-        for m in data.get('models', []):
-            if 'generateContent' in m.get('supportedGenerationMethods', []):
-                # Wir reinigen den Namen (entferne 'models/')
-                clean_name = m['name'].replace('models/', '')
-                candidates.append(clean_name)
-        
-        if not candidates:
-            return None, "Keine Text-Modelle für diesen Key gefunden."
-            
-        # Priorisierung: Flash -> Pro -> Irgendwas
-        # Wir versuchen 1.5 Flash
-        for c in candidates:
-            if "flash" in c and "1.5" in c: return c, None
-        # Dann 1.5 Pro
-        for c in candidates:
-            if "pro" in c and "1.5" in c: return c, None
-        # Dann irgendein Pro
-        for c in candidates:
-            if "pro" in c: return c, None
-            
-        return candidates[0], None # Nimm einfach das erste
-        
-    except Exception as e:
-        return None, f"Verbindungsfehler bei Modellsuche: {str(e)}"
-
-# --- REST API CALL ---
-def call_gemini_dynamic(prompt):
+# --- INTELLIGENTER KI AUFRUF MIT WARTEZEIT (RETRY LOGIC) ---
+def call_gemini_with_retry(prompt):
     if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
     api_key = st.secrets["gemini_api_key"]
     
-    # 1. Modell finden
-    model_name, err = find_best_available_model(api_key)
-    if not model_name: return None, f"Diagnose: {err}"
+    # Wir nehmen Flash 1.5 - das hat die höchsten Limits
+    model = "gemini-1.5-flash"
     
-    # 2. Modell nutzen
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200:
-            result = response.json()
-            try:
-                text = result['candidates'][0]['content']['parts'][0]['text']
-                return text.replace("```json", "").replace("```", "").strip(), None
-            except: return None, "Leere Antwort von Google"
-        elif response.status_code == 429: return None, "Rate Limit (429)"
-        else: return None, f"Fehler {response.status_code} mit Modell '{model_name}'"
-    except Exception as e: return None, str(e)
+    # Wir versuchen es bis zu 3 Mal
+    retries = 3
+    for attempt in range(retries):
+        try:
+            response = requests.post(url, headers=headers, json=data)
+            
+            if response.status_code == 200:
+                result = response.json()
+                try:
+                    text = result['candidates'][0]['content']['parts'][0]['text']
+                    return text.replace("```json", "").replace("```", "").strip(), None
+                except: return None, "Leere Antwort"
+                
+            elif response.status_code == 429:
+                # RATE LIMIT! Wir müssen warten.
+                if attempt < retries - 1:
+                    wait_time = (attempt + 1) * 10 # 10s, dann 20s
+                    time.sleep(wait_time)
+                    continue # Nächster Versuch
+                else:
+                    return None, "Google ist gerade überlastet (429). Bitte warte eine Minute."
+            
+            elif response.status_code == 404:
+                return None, f"Modell {model} nicht gefunden. Prüfe API Key Region."
+                
+            else:
+                return None, f"Fehler {response.status_code}"
+                
+        except Exception as e: return None, str(e)
+        
+    return None, "Maximale Versuche erreicht."
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
@@ -300,7 +280,7 @@ def get_ai_tags_and_year(titel, autor):
     2. Gib mir das Erscheinungsjahr (YYYY).
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
-    raw_text, err = call_gemini_dynamic(prompt)
+    raw_text, err = call_gemini_with_retry(prompt)
     if not raw_text: return {"tags": "", "year": ""}
     try: return json.loads(raw_text)
     except: return {"tags": "", "year": ""}
@@ -313,10 +293,10 @@ def get_ai_book_info(titel, autor):
     Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
     Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
     """
-    raw_text, err = call_gemini_dynamic(prompt)
-    if not raw_text: return {"teaser": f"KI Fehler: {err}", "bio": "-"}
+    raw_text, err = call_gemini_with_retry(prompt)
+    if not raw_text: return {"teaser": f"KI pausiert ({err})", "bio": "-"}
     try: return json.loads(raw_text)
-    except: return {"teaser": "Fehler beim Lesen der Antwort", "bio": "-"}
+    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -341,7 +321,8 @@ def batch_enrich_books(ws, df):
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
         
         if not ai_res.get("tags") and not ai_res.get("year"):
-            time.sleep(2)
+            # Fehlerfall -> wir warten EXTRA lange
+            time.sleep(5)
             continue
 
         try:
@@ -354,7 +335,8 @@ def batch_enrich_books(ws, df):
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        time.sleep(6.0) 
+        # SEHR LANGE PAUSE im Batch Modus um sicher zu sein
+        time.sleep(10.0) 
         
     status_text.success(f"Fertig! {count} Bücher aktualisiert.")
     time.sleep(2)
@@ -418,6 +400,7 @@ def show_book_details(book, ws_books, ws_authors):
     with d_tab1:
         st.markdown(f"### {book['Titel']}")
         
+        # SICHERE ABFRAGE DES JAHRES
         year_val = book.get('Erschienen')
         year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
         st.markdown(f"**von {book['Autor']}{year_str}**")
