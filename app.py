@@ -138,7 +138,6 @@ def check_structure(ws):
     try:
         head = ws.row_values(1)
         if not head: ws.update_cell(1,1,"Titel"); head=["Titel"]
-        # NEUE STRUKTUR MIT JAHR
         needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen"]
         next_c = len(head)+1
         for n in needed:
@@ -218,9 +217,8 @@ def fetch_meta(titel, autor):
         info = r["items"][0]["volumeInfo"]
         c = info.get("imageLinks", {}).get("thumbnail", "")
         g = process_genre(info.get("categories", ["Roman"])[0])
-        # JAHR HOLEN
         pub_date = info.get("publishedDate", "")
-        if pub_date: y = pub_date[:4] # Nur das Jahr (YYYY)
+        if pub_date: y = pub_date[:4]
     except: pass
     if not c:
         try:
@@ -234,7 +232,6 @@ def fetch_meta(titel, autor):
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
-    """Holt Tags UND Jahr (falls Meta fetch fehlschlug)"""
     if "gemini_api_key" not in st.secrets: return {"tags": "", "year": ""}
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
@@ -256,15 +253,12 @@ def get_ai_tags_and_year(titel, autor):
     except: return {"tags": "", "year": ""}
 
 def batch_enrich_books(ws, df):
-    """Füllt fehlende Tags und Erscheinungsjahre auf"""
-    # Check ob Spalten existieren
     headers = [str(h).lower() for h in ws.row_values(1)]
     try: 
         col_tag_idx = headers.index("tags") + 1
         col_year_idx = headers.index("erschienen") + 1
     except: return 0
     
-    # Finde Zeilen wo Tags ODER Jahr fehlen
     df_missing = df[ (df["Tags"] == "") | (df["Erschienen"] == "") | (df["Tags"].isnull()) | (df["Erschienen"].isnull()) ]
     
     if df_missing.empty: return 0
@@ -277,28 +271,17 @@ def batch_enrich_books(ws, df):
     
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere: {row['Titel']}...")
-        
-        # KI fragen
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
-        
         try:
             cell = ws.find(row["Titel"])
-            
-            # Nur updaten wenn vorher leer
             current_tags = row["Tags"]
             current_year = row["Erschienen"]
-            
-            if not current_tags and ai_res.get("tags"):
-                ws.update_cell(cell.row, col_tag_idx, ai_res["tags"])
-            
-            if not current_year and ai_res.get("year"):
-                ws.update_cell(cell.row, col_year_idx, ai_res["year"])
-            
+            if not current_tags and ai_res.get("tags"): ws.update_cell(cell.row, col_tag_idx, ai_res["tags"])
+            if not current_year and ai_res.get("year"): ws.update_cell(cell.row, col_year_idx, ai_res["year"])
             count += 1
         except: pass
-        
         progress_bar.progress((count + 1) / total)
-        time.sleep(1.5) # Etwas langsamer für Stabilität
+        time.sleep(1.5)
         
     status_text.text("Fertig!")
     time.sleep(1)
@@ -384,8 +367,9 @@ def show_book_details(book, ws_books, ws_authors):
     
     with d_tab1:
         st.markdown(f"### {book['Titel']}")
-        # HIER: ANZEIGE DES JAHRES
-        year_str = f" ({book['Erschienen']})" if book.get('Erschienen') else ""
+        # SICHERE ABFRAGE DES JAHRES
+        year_val = book.get('Erschienen')
+        year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
         st.markdown(f"**von {book['Autor']}{year_str}**")
         
         col1, col2 = st.columns([1, 2])
@@ -441,7 +425,7 @@ def show_book_details(book, ws_books, ws_authors):
                     headers = [str(h).lower() for h in ws_books.row_values(1)]
                     col_t = headers.index("titel") + 1
                     col_a = headers.index("autor") + 1
-                    # Flexible Spaltenfindung
+                    
                     try: col_tags = headers.index("tags") + 1
                     except: col_tags = len(headers) + 1 
                     try: col_y = headers.index("erschienen") + 1
@@ -479,6 +463,13 @@ def main():
     if "df_books" not in st.session_state: 
         with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
     
+    # --- HOTFIX: MIGRATION CHECK ---
+    # Prüft, ob die geladene Tabelle schon die neue Spalte hat. Wenn nicht: Neu laden.
+    if "df_books" in st.session_state:
+        if "Erschienen" not in st.session_state.df_books.columns:
+            st.session_state.df_books = get_data(ws_books)
+            st.rerun()
+
     df = st.session_state.df_books
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
@@ -516,8 +507,6 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Lade Metadaten (inkl. Jahr & Tags)..."):
                         c, g, y = fetch_meta(t, fa)
-                        # Wenn fetch_meta kein Jahr fand, macht die KI später den Rest beim Batch,
-                        # ODER wir fragen sie direkt. Machen wir direkt:
                         ai_res = get_ai_tags_and_year(t, fa)
                         tags = ai_res["tags"]
                         if not y: y = ai_res["year"]
@@ -565,7 +554,6 @@ def main():
                             if st.button("ℹ️ Info", key=f"k_{idx}"): show_book_details(row, ws_books, ws_authors)
                         with c2:
                             st.write(f"**{row['Titel']}**")
-                            # HIER: AUTOR + JAHR ANZEIGEN
                             meta_line = row["Autor"]
                             if row["Erschienen"]: meta_line += f" ({row['Erschienen']})"
                             if "Tags" in row and row["Tags"]: 
@@ -646,7 +634,7 @@ def main():
                     show_book_details(df_w.loc[sel_idx], ws_books, ws_authors)
         else: st.info("Leer.")
 
-    # --- STATISTIK ---
+    # --- STATISTIK & AUTOREN ---
     with tab_stats:
         st.header("📊 Statistik & Autoren")
         df_r = df[df["Status"] == "Gelesen"]
