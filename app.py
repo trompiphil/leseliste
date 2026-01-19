@@ -209,7 +209,6 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
         idx_s = headers.index("status")
     except: return 0
     
-    # Clean Map bauen (Alle Bücher)
     raws = [deep_clean(row[idx_a]) for row in books_vals[1:] if len(row)>idx_a and row[idx_a]]
     clean_map = {}
     for r in raws: clean_map.setdefault(r.strip(), []).append(r)
@@ -237,14 +236,12 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
             new_data.append(nr)
         if changed: ws_books.update(new_data); books_vals = new_data 
 
-    # Autorenliste erstellen: NUR aus "Gelesen" (bzw. leeren Status = legacy Gelesen)
-    # Ignoriere "Wunschliste"
     final_authors = set()
     for row in books_vals[1:]:
         if len(row) > idx_a and len(row) > idx_s:
             status = row[idx_s].strip()
             auth = row[idx_a].strip()
-            # Nur hinzufügen wenn Status NICHT Wunschliste ist
+            # NUR Gelesene Autoren aufnehmen
             if auth and status != "Wunschliste":
                 final_authors.add(auth)
 
@@ -365,7 +362,23 @@ def main():
                             st.image(cov, use_container_width=True)
                             try: stars = int(row["Bewertung"])
                             except: stars = 0
-                            st.markdown(f"<div style='text-align:center; color:#d35400; font-size:1.2em;'>{'★'*stars}<span style='color:#ccc;'>{'★'*(5-stars)}</span></div>", unsafe_allow_html=True)
+                            
+                            # Bewertung
+                            default_idx = stars - 1 if stars > 0 else None
+                            new_rating_idx = st.feedback("stars", key=f"star_widget_{idx}")
+                            
+                            # Logik: Wenn User klickt, wird reloaded. Wir prüfen ob wert in session state
+                            w_key = f"star_widget_{idx}"
+                            if w_key in st.session_state and st.session_state[w_key] is not None:
+                                user_val = st.session_state[w_key] + 1
+                                if user_val != stars:
+                                    update_single_entry(ws_books, row["Titel"], "Bewertung", user_val)
+                                    st.toast(f"Bewertung gespeichert: {user_val} Sterne")
+                                    del st.session_state.df_books
+                                    time.sleep(0.5); st.rerun()
+                            # Fallback Anzeige wenn nix geklickt (Visuell via HTML da Feedback default buggy sein kann bei Reruns)
+                            elif stars > 0:
+                                st.markdown(f"<div style='text-align:center; color:#d35400;'>{'★'*stars}</div>", unsafe_allow_html=True)
 
                         with c_info:
                             st.subheader(row["Titel"])
@@ -403,37 +416,41 @@ def main():
         df_w = st.session_state.df_books[st.session_state.df_books["Status"]=="Wunschliste"].copy()
         
         if not df_w.empty:
-            # --- MERKLISTE: KACHELANSICHT ---
+            # --- KACHELN WUNSCHLISTE ---
             if w_view == "Kacheln":
                 cols = st.columns(3)
                 for i, (idx, row) in enumerate(df_w.iterrows()):
                     with cols[i % 3]:
                         with st.container(border=True):
                             c_img, c_info = st.columns([1, 2])
+                            
+                            # LINKS: BILD + BUTTON
                             with c_img:
                                 cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
                                 st.image(cov, use_container_width=True)
-                                # Button unter Bild
                                 if st.button("✅ Gelesen", key=f"wk_{idx}", use_container_width=True):
                                     cell = ws_books.find(row["Titel"])
                                     ws_books.update_cell(cell.row, 8, "Gelesen")
                                     ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
+                                    cleanup_author_duplicates_batch(ws_books, ws_authors) # Autor in Liste aufnehmen
                                     del st.session_state.df_books; st.rerun()
 
+                            # RECHTS: TEXTFELD (Wie in Sammlung)
                             with c_info:
                                 st.subheader(row["Titel"])
                                 st.caption(row["Autor"])
                                 
-                                # Editierbare Notiz
                                 current_n = row["Notiz"]
-                                new_n = st.text_area("Notiz", value=current_n, key=f"wnote_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz...")
+                                # HIER IST DAS EDITIERBARE FELD FÜR DIE WUNSCHLISTE
+                                new_n = st.text_area("Notiz", value=current_n, key=f"wnote_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz hier tippen...")
+                                
                                 if new_n != current_n:
                                     update_single_entry(ws_books, row["Titel"], "Notiz", new_n)
                                     st.toast("Notiz gespeichert!")
                                     del st.session_state.df_books
                                     time.sleep(0.5); st.rerun()
 
-            # --- MERKLISTE: LISTENANSICHT (Alter Style) ---
+            # --- LISTE WUNSCHLISTE ---
             else:
                 for i, r in df_w.iterrows():
                     with st.container(border=True):
@@ -447,6 +464,7 @@ def main():
                             cell = ws_books.find(r["Titel"])
                             ws_books.update_cell(cell.row, 8, "Gelesen")
                             ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
+                            cleanup_author_duplicates_batch(ws_books, ws_authors)
                             del st.session_state.df_books; st.rerun()
         else: st.info("Merkliste leer.")
 
