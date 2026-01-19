@@ -227,47 +227,74 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- ROBUSTER KI AUFRUF (REST API - DIAGNOSE MODUS) ---
-def call_gemini_brute_force(prompt):
-    if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
+# --- KEY DIAGNOSE ---
+def check_api_key_models():
+    """Prüft, was der Key wirklich darf."""
+    if "gemini_api_key" not in st.secrets: return None, "Kein API Key in Secrets"
+    
+    api_key = st.secrets["gemini_api_key"]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    
+    try:
+        r = requests.get(url)
+        if r.status_code == 200:
+            data = r.json()
+            # Finde alle Modelle, die Text generieren können
+            valid_models = []
+            for m in data.get('models', []):
+                if 'generateContent' in m.get('supportedGenerationMethods', []):
+                    # Entferne 'models/' Präfix
+                    name = m['name'].split('/')[-1]
+                    valid_models.append(name)
+            
+            if not valid_models:
+                return None, "API Key gültig, aber KEINE Modelle verfügbar (Berechtigung fehlt?)"
+            
+            # Wähle das beste verfügbare
+            # 1.5 Flash > 1.5 Pro > 1.0 Pro
+            best_model = None
+            if "gemini-1.5-flash" in valid_models: best_model = "gemini-1.5-flash"
+            elif "gemini-1.5-pro" in valid_models: best_model = "gemini-1.5-pro"
+            elif "gemini-1.0-pro" in valid_models: best_model = "gemini-1.0-pro"
+            else: best_model = valid_models[0]
+            
+            return best_model, None # Erfolg!
+            
+        else:
+            return None, f"Google Error {r.status_code}: {r.text}"
+    except Exception as e:
+        return None, f"Verbindungstest fehlgeschlagen: {str(e)}"
+
+# --- UNIVERSELLER CALLER ---
+def call_gemini(prompt):
+    # Modell holen (aus Session State oder frisch prüfen)
+    if "working_model" not in st.session_state:
+        model, err = check_api_key_models()
+        if not model: return None, f"FATAL: {err}"
+        st.session_state.working_model = model
+    
+    model = st.session_state.working_model
     api_key = st.secrets["gemini_api_key"]
     
-    # Wir probieren nur EINE Sache: Das Standard-Modell.
-    # Wenn das nicht geht, zeigen wir den Fehler.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    data = {"contents": [{"parts": [{"text": prompt}]}]}
     
-    models_to_try = ["gemini-1.5-flash", "gemini-1.0-pro"]
-    
-    last_error_msg = ""
-    
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        headers = {'Content-Type': 'application/json'}
-        data = {"contents": [{"parts": [{"text": prompt}]}]}
-        
-        try:
-            response = requests.post(url, headers=headers, json=data)
-            
-            if response.status_code == 200:
-                result = response.json()
-                try:
-                    text = result['candidates'][0]['content']['parts'][0]['text']
-                    return text.replace("```json", "").replace("```", "").strip(), None
-                except: continue # Format-Fehler
-            
-            elif response.status_code == 429:
-                # Rate Limit -> Sofort abbrechen und User warnen (Warten bringt im Loop nichts)
-                return None, "Google-Limit erreicht (429). Bitte 1 Minute warten."
-            
-            else:
-                # Echter Fehler -> Speichern und nächstes Modell probieren
-                last_error_msg = f"Fehler {response.status_code}: {response.text}"
-                continue 
-                
-        except Exception as e:
-            last_error_msg = f"Verbindung: {str(e)}"
-            continue
-            
-    return None, f"Alle Versuche fehlgeschlagen. Letzter Fehler: {last_error_msg}"
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            try:
+                res = response.json()
+                txt = res['candidates'][0]['content']['parts'][0]['text']
+                return txt.replace("```json", "").replace("```", "").strip(), None
+            except: return None, "Leere Antwort"
+        elif response.status_code == 429:
+            return None, "Rate Limit (429) - Bitte warten"
+        else:
+            # Falls das Modell doch nicht geht (z.B. Region block), Session löschen und neu suchen
+            if "working_model" in st.session_state: del st.session_state.working_model
+            return None, f"Fehler {response.status_code}"
+    except Exception as e: return None, str(e)
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
@@ -278,10 +305,8 @@ def get_ai_tags_and_year(titel, autor):
     2. Gib mir das Erscheinungsjahr (YYYY).
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
-    raw_text, err = call_gemini_brute_force(prompt)
-    if not raw_text: 
-        # Optional: Fehler ausgeben in Konsole/UI zur Diagnose
-        return {"tags": "", "year": ""}
+    raw_text, err = call_gemini(prompt)
+    if not raw_text: return {"tags": "", "year": ""}
     try: return json.loads(raw_text)
     except: return {"tags": "", "year": ""}
 
@@ -293,10 +318,10 @@ def get_ai_book_info(titel, autor):
     Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
     Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
     """
-    raw_text, err = call_gemini_brute_force(prompt)
-    if not raw_text: return {"teaser": f"KI-Diagnose: {err}", "bio": "Bitte Screenshot von diesem Fehler machen."}
+    raw_text, err = call_gemini(prompt)
+    if not raw_text: return {"teaser": f"KI Fehler: {err}", "bio": "-"}
     try: return json.loads(raw_text)
-    except: return {"teaser": "Fehler beim Lesen der Antwort", "bio": "-"}
+    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -317,11 +342,8 @@ def batch_enrich_books(ws, df):
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
         
-        # KI Call
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
         
-        # Check ob KI überhaupt antwortet
-        # Wir loggen hier nicht, da Batch sonst nervt
         if not ai_res.get("tags") and not ai_res.get("year"):
             time.sleep(2)
             continue
@@ -512,6 +534,18 @@ def main():
         st.write("🔧 **Einstellungen**")
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
+        
+        # --- DIAGNOSE ANZEIGE ---
+        if "working_model" not in st.session_state:
+            with st.spinner("Prüfe API Key..."):
+                m, err = check_api_key_models()
+                if m: 
+                    st.session_state.working_model = m
+                    st.success(f"✅ Verbunden: {m}")
+                else:
+                    st.error(f"❌ Key Fehler: {err}")
+        else:
+            st.success(f"✅ Verbunden: {st.session_state.working_model}")
         
         st.markdown("---")
         st.write("🤖 **KI-Tools**")
