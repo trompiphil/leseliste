@@ -228,34 +228,22 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- DAS IST DER NEUE SUPER-SICHERE KI-AUFRUF ---
-def query_gemini_fallback(prompt):
-    """Versucht stur Modelle durch, bis eines klappt."""
+# --- DIESE FUNKTION RUFT DIE KI SICHER AUF ---
+def safe_generate(prompt):
     if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
+    
     genai.configure(api_key=st.secrets["gemini_api_key"])
     
-    # LISTE DER ERLAUBTEN MODELLE (KEIN 2.5 DABEI!)
-    safe_models = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-8b",
-        "gemini-1.5-pro",
-        "gemini-1.0-pro"
-    ]
+    # HARDCODED: Wir nehmen NUR das stabile Flash-Modell
+    model = genai.GenerativeModel("gemini-1.5-flash")
     
-    last_error = ""
-    for model_name in safe_models:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            # Erfolgreich? Text putzen und raus damit!
-            return response.text.replace("```json", "").replace("```", "").strip(), None
-        except Exception as e:
-            last_error = str(e)
-            # Wenn Fehler 429 (Limit) -> Nächstes Modell probieren
-            # Wenn Fehler 404 (Modell nicht da) -> Nächstes Modell probieren
-            continue
-            
-    return None, f"Alle Modelle belegt/fehlerhaft. Letzter Fehler: {last_error}"
+    try:
+        response = model.generate_content(prompt)
+        return response.text.replace("```json", "").replace("```", "").strip(), None
+    except Exception as e:
+        err = str(e)
+        if "429" in err: return None, "Rate Limit (Warte kurz)"
+        return None, f"Fehler: {err}"
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
@@ -266,12 +254,23 @@ def get_ai_tags_and_year(titel, autor):
     2. Gib mir das Erscheinungsjahr (YYYY).
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
-    
-    raw_text, error = query_gemini_fallback(prompt)
-    if not raw_text: return {"tags": "", "year": ""}
-    
-    try: return json.loads(raw_text)
+    text, err = safe_generate(prompt)
+    if not text: return {"tags": "", "year": ""}
+    try: return json.loads(text)
     except: return {"tags": "", "year": ""}
+
+@st.cache_data(show_spinner=False)
+def get_ai_book_info(titel, autor):
+    prompt = f"""
+    Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
+    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
+    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
+    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
+    """
+    text, err = safe_generate(prompt)
+    if not text: return {"teaser": f"KI pausiert ({err})", "bio": "-"}
+    try: return json.loads(text)
+    except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -281,7 +280,6 @@ def batch_enrich_books(ws, df):
     except: return 0
     
     df_missing = df[ (df["Tags"] == "") | (df["Erschienen"] == "") | (df["Tags"].isnull()) | (df["Erschienen"].isnull()) ]
-    
     if df_missing.empty: return 0
     
     progress_bar = st.sidebar.progress(0)
@@ -293,12 +291,12 @@ def batch_enrich_books(ws, df):
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
         
+        # KI Call
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
         
-        # Leere Ergebnisse ignorieren
+        # Wenn leer (Fehler/Limit), warten wir kurz und machen weiter
         if not ai_res.get("tags") and not ai_res.get("year"):
-            # Wenn die KI nichts liefert (wegen Fehler), machen wir weiter
-            time.sleep(1)
+            time.sleep(2)
             continue
 
         try:
@@ -311,28 +309,14 @@ def batch_enrich_books(ws, df):
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        time.sleep(2.0) # Bremse
+        # 5 Sekunden Pause = 12 Anfragen pro Minute (Limit ist 15)
+        time.sleep(5.0) 
         
     status_text.success(f"Fertig! {count} Bücher aktualisiert.")
     time.sleep(2)
     status_text.empty()
     progress_bar.empty()
     return count
-
-@st.cache_data(show_spinner=False)
-def get_ai_book_info(titel, autor):
-    prompt = f"""
-    Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
-    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
-    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
-    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
-    """
-    
-    raw_text, error = query_gemini_fallback(prompt)
-    if not raw_text: return {"teaser": f"KI überlastet ({error})", "bio": "-"}
-    
-    try: return json.loads(raw_text)
-    except: return {"teaser": "Fehler beim Lesen der KI-Antwort", "bio": "-"}
 
 def smart_author(short, known):
     s = short.strip().lower()
@@ -390,6 +374,7 @@ def show_book_details(book, ws_books, ws_authors):
     with d_tab1:
         st.markdown(f"### {book['Titel']}")
         
+        # SICHERE ABFRAGE DES JAHRES
         year_val = book.get('Erschienen')
         year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
         st.markdown(f"**von {book['Autor']}{year_str}**")
@@ -488,7 +473,7 @@ def main():
     if "df_books" not in st.session_state: 
         with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
     
-    # --- MIGRATION CHECK ---
+    # --- HOTFIX: MIGRATION CHECK ---
     if "df_books" in st.session_state:
         if "Erschienen" not in st.session_state.df_books.columns:
             st.session_state.df_books = get_data(ws_books)
@@ -508,6 +493,7 @@ def main():
         if st.button("✨ Daten anreichern (Tags & Jahr)"):
             count = batch_enrich_books(ws_books, df)
             if count > 0:
+                st.success(f"{count} Bücher aktualisiert!")
                 del st.session_state.df_books
                 time.sleep(2); st.rerun()
             else: st.info("Alles aktuell.")
@@ -530,6 +516,7 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Lade Metadaten (inkl. Jahr & Tags)..."):
                         c, g, y = fetch_meta(t, fa)
+                        # KI Tags (hier auch sicher aufrufen)
                         ai_res = get_ai_tags_and_year(t, fa)
                         tags = ai_res["tags"] if ai_res else ""
                         if not y and ai_res: y = ai_res["year"]
