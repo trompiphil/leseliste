@@ -115,33 +115,33 @@ def setup_sheets(client):
 def check_and_update_structure(ws):
     """Prüft, ob die neuen Spalten da sind, und legt sie an, falls nicht."""
     try:
-        # Lese nur die erste Zeile (Header)
         current_headers = ws.row_values(1)
-        
-        # Liste der benötigten neuen Spalten
         needed_headers = ["Hinzugefügt", "Notiz", "Status"]
-        
-        # Nächste freie Spalte finden
         next_col = len(current_headers) + 1
         
         for header in needed_headers:
-            # Case-Insensitive Prüfung
             exists = any(h.lower() == header.lower() for h in current_headers)
-            
             if not exists:
-                # Wenn fehlt: Einfügen
                 ws.update_cell(1, next_col, header)
-                st.toast(f"🔧 Habe Spalte '{header}' automatisch angelegt!", icon="🏗️")
+                # st.toast(f"🔧 Habe Spalte '{header}' angelegt!", icon="🏗️")
                 next_col += 1
-                time.sleep(0.5) # Kurz warten für API Sicherheit
-                
+                time.sleep(0.5)
     except Exception as e:
-        print(f"Fehler beim Struktur-Update: {e}")
+        print(f"Fehler Struktur: {e}")
 
 def fetch_data_from_sheet(worksheet):
     try:
         all_values = worksheet.get_all_values()
-        if len(all_values) < 2: return pd.DataFrame()
+        
+        # --- SICHERHEITS-FIX ---
+        # Wenn die Tabelle leer ist (nur Header oder gar nichts),
+        # geben wir ein leeres DataFrame mit ALLEN möglichen Spalten zurück.
+        # Das verhindert den KeyError "Name" bei frischen Tabellen.
+        if len(all_values) < 2: 
+            return pd.DataFrame(columns=[
+                "Titel", "Autor", "Cover", "Bewertung", 
+                "Genre", "Name", "Hinzugefügt", "Notiz", "Status"
+            ])
         
         headers = [str(h).strip().lower() for h in all_values[0]]
         col_map = {}
@@ -166,13 +166,24 @@ def fetch_data_from_sheet(worksheet):
                 if idx < len(raw_row):
                     entry[key] = raw_row[idx]
             
-            # Fallback für leeren Status bei alten Einträgen (wichtig für die Liste!)
             if not entry["Status"]: entry["Status"] = "Gelesen"
             
             if entry["Titel"] or entry["Name"]:
                 rows.append(entry)
+        
+        # Falls trotz Daten keine Zeilen erkannt wurden (selten), leeres DF mit Spalten
+        if not rows:
+             return pd.DataFrame(columns=[
+                "Titel", "Autor", "Cover", "Bewertung", 
+                "Genre", "Name", "Hinzugefügt", "Notiz", "Status"
+            ])
+
         return pd.DataFrame(rows)
-    except Exception as e: return pd.DataFrame()
+    except Exception as e: 
+        return pd.DataFrame(columns=[
+                "Titel", "Autor", "Cover", "Bewertung", 
+                "Genre", "Name", "Hinzugefügt", "Notiz", "Status"
+            ])
 
 def force_reload():
     if "df_books" in st.session_state: del st.session_state.df_books
@@ -186,8 +197,16 @@ def sync_authors(ws_books, ws_authors):
     df_b = st.session_state.df_books
     df_a = st.session_state.df_authors
     if df_b.empty: return 0
-    book_authors = set([a.strip() for a in df_b["Autor"].tolist() if a.strip()])
-    existing_authors = set([a.strip() for a in df_a["Name"].tolist() if a.strip()]) if not df_a.empty and "Name" in df_a else set()
+    
+    # Sicherstellen, dass Spalten existieren
+    if "Autor" not in df_b.columns: return 0
+    if "Name" not in df_a.columns: 
+        existing_authors = set()
+    else:
+        existing_authors = set([a.strip() for a in df_a["Name"].tolist() if str(a).strip()])
+
+    book_authors = set([a.strip() for a in df_b["Autor"].tolist() if str(a).strip()])
+    
     missing = list(book_authors - existing_authors)
     missing.sort()
     if missing:
@@ -292,8 +311,6 @@ def main():
     
     ws_books, ws_authors = setup_sheets(client)
 
-    # --- AUTOMATISCHE STRUKTUR-PRÜFUNG ---
-    # Hier prüft der Bot, ob die Spalten fehlen, und legt sie an
     if "structure_checked" not in st.session_state:
         check_and_update_structure(ws_books)
         st.session_state.structure_checked = True
@@ -304,7 +321,12 @@ def main():
 
     sync_authors(ws_books, ws_authors)
     
-    known_authors = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
+    # Hier war der Fehler: Wenn df_authors leer war, gab es KeyError "Name"
+    # Jetzt ist sichergestellt, dass "Name" existiert (durch fetch_data_from_sheet Anpassung)
+    if "Name" in st.session_state.df_authors.columns:
+        known_authors = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
+    else:
+        known_authors = []
 
     # NAVIGATION
     nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔮 Merkliste", "👥 Autoren", "🔍 Sammlung"], horizontal=True, label_visibility="collapsed")
@@ -343,14 +365,13 @@ def main():
                         final_aut = get_smart_author_name(aut, known_authors)
                         c, g = fetch_book_data_background(tit, final_aut)
                         date_str = datetime.now().strftime("%Y-%m-%d")
-                        # Status = Wunschliste, Bewertung = leer
                         ws_books.append_row([tit, final_aut, g, "", c or NO_COVER_MARKER, date_str, note_w, "Wunschliste"])
                         del st.session_state.df_books
                         st.success(f"Gemerkt: {tit}"); st.rerun()
                     else: st.error("Komma fehlt!")
 
         df = st.session_state.df_books.copy()
-        if not df.empty:
+        if not df.empty and "Status" in df.columns:
             df_wish = df[df["Status"] == "Wunschliste"]
             if not df_wish.empty:
                 for idx, row in df_wish.iterrows():
@@ -366,9 +387,6 @@ def main():
                         with c3:
                             if st.button("✅ Gelesen!", key=f"read_{idx}"):
                                 cell = ws_books.find(row["Titel"])
-                                # Spalten finden (dynamisch wäre besser, aber wir kennen die Struktur)
-                                # Titel=1, ..., Status ist die letzte Spalte die wir hinzugefügt haben.
-                                # Wir suchen die Spalte "Status" in der ersten Zeile.
                                 headers = ws_books.row_values(1)
                                 try:
                                     status_col_idx = [h.lower() for h in headers].index("status") + 1
@@ -385,19 +403,22 @@ def main():
             view_mode = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed")
 
         df = st.session_state.df_books.copy()
-        # Nur gelesene anzeigen (Fallback für alte Daten: wenn Status leer ist -> anzeigen)
+        
+        # Sicherstellen, dass Status da ist
+        if "Status" not in df.columns: df["Status"] = "Gelesen"
+        
         df = df[ (df["Status"] == "Gelesen") | (df["Status"] == "") ]
         
         if not df.empty:
-            df["Hinzugefügt"] = pd.to_datetime(df["Hinzugefügt"], errors='coerce')
+            if "Hinzugefügt" in df.columns:
+                df["Hinzugefügt"] = pd.to_datetime(df["Hinzugefügt"], errors='coerce')
+                df = df.sort_values(by="Hinzugefügt", ascending=False)
             
             search = st.text_input("🔍 Suchen:", placeholder="Titel, Autor, Jahr...")
             if search:
                 s = search.lower().strip()
-                df = df[df["Titel"].str.lower().str.contains(s) | df["Autor"].str.lower().str.contains(s) | df["Hinzugefügt"].astype(str).str.contains(s)]
+                df = df[df["Titel"].str.lower().str.contains(s) | df["Autor"].str.lower().str.contains(s)]
             
-            df = df.sort_values(by="Hinzugefügt", ascending=False)
-
             if view_mode == "Liste":
                 edited = st.data_editor(
                     df,
@@ -432,7 +453,7 @@ def main():
                             """, unsafe_allow_html=True)
                             with st.expander("📝 Notiz"):
                                 st.write(row["Notiz"] if row["Notiz"] else "Keine Notiz")
-                                if pd.notnull(row['Hinzugefügt']):
+                                if "Hinzugefügt" in row and pd.notnull(row['Hinzugefügt']):
                                     st.caption(f"📅 {row['Hinzugefügt'].strftime('%d.%m.%Y')}")
 
         else: st.info("Noch keine Bücher gelesen.")
@@ -442,10 +463,11 @@ def main():
         st.header("Autoren Statistik")
         df_b = st.session_state.df_books
         df_a = st.session_state.df_authors.copy()
-        if not df_b.empty:
+        if not df_b.empty and "Autor" in df_b.columns:
             counts = df_b["Autor"].value_counts()
-            df_a["Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
-            st.dataframe(df_a.sort_values("Bücher", ascending=False), hide_index=True, use_container_width=True)
+            if "Name" in df_a.columns:
+                df_a["Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
+                st.dataframe(df_a.sort_values("Bücher", ascending=False), hide_index=True, use_container_width=True)
 
 if __name__ == "__main__":
     main()
