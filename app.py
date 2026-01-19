@@ -71,22 +71,42 @@ st.markdown("""
 
 def get_connection():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    
+    # 1. VERSUCH: Lade aus Streamlit Secrets (Online-Modus)
     if "gcp_service_account" in st.secrets:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        try:
+            # Wir machen eine Kopie der Daten, damit wir sie bearbeiten können
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            
+            # --- DER WICHTIGE FIX ---
+            # Manchmal werden Zeilenumbrüche (\n) als Text "\\n" interpretiert.
+            # Das korrigieren wir hier automatisch:
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            return gspread.authorize(creds)
+        except Exception as e:
+            # Falls das schiefgeht, zeigen wir den Fehler im Detail (nur zum Debuggen)
+            st.error(f"Fehler bei der Anmeldung mit Secrets: {e}")
+            return None
+
+    # 2. VERSUCH: Lade lokale Datei (PC-Modus - Fallback)
     else:
         try:
             creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-        except FileNotFoundError: return None
-    return gspread.authorize(creds)
+            return gspread.authorize(creds)
+        except FileNotFoundError:
+            return None
 
 def setup_sheets(client):
-    # HIER SPÄTER WICHTIG: Der Name des Google Sheets muss stimmen!
-    # Wir nennen es für deine Freundin am besten einfach "Bücherliste"
     try:
         sh = client.open("Bücherliste") 
     except:
-        st.error("Konnte Tabelle 'Bücherliste' nicht finden. Hast du sie erstellt und freigegeben?")
+        st.error("⚠️ Konnte die Tabelle 'Bücherliste' nicht finden.\n\n"
+                 "Bitte prüfe:\n"
+                 "1. Hast du bei Google Drive eine Tabelle namens **Bücherliste** erstellt?\n"
+                 "2. Hast du sie für die E-Mail **buch-bot@...** freigegeben?")
         st.stop()
         
     ws_books = sh.sheet1
@@ -339,7 +359,10 @@ def main():
     try:
         client = get_connection()
         if client is None: 
-            st.warning("⚠️ Verbindung zu Google fehlt noch. Bitte in Streamlit Secrets einrichten.")
+            st.warning("⚠️ Verbindung zu Google fehlt noch.\n\n"
+                       "Bitte überprüfe in den **Streamlit Secrets**:\n"
+                       "1. Hast du den Header `[gcp_service_account]` ganz oben stehen?\n"
+                       "2. Hast du 'Save' gedrückt?")
             st.stop()
         
         ws_books, ws_authors = setup_sheets(client)
