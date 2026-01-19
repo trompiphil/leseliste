@@ -10,7 +10,7 @@ from deep_translator import GoogleTranslator
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide")
 
-# --- CSS DESIGN (MOBILE OPTIMIZED) ---
+# --- CSS DESIGN (MOBILE OPTIMIZED v2) ---
 st.markdown("""
     <style>
     /* Globaler Reset */
@@ -24,7 +24,7 @@ st.markdown("""
         color: #000000 !important;
     }
     
-    /* Buttons */
+    /* Buttons (Global) */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -36,18 +36,63 @@ st.markdown("""
         background-color: #e67e22 !important;
     }
 
-    /* Container Styling (für die Kacheln) */
+    /* --- SIDEBAR STYLING (Das "Menü") --- */
+    
+    /* 1. Den Menü-Pfeil oben links sichtbar machen (Fake Hamburger Button) */
+    [data-testid="stSidebarCollapsedControl"] {
+        background-color: #d35400 !important;
+        color: white !important;
+        border-radius: 8px;
+        padding: 4px;
+        border: 2px solid white;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+    }
+    
+    /* Sidebar Hintergrund */
+    section[data-testid="stSidebar"] {
+        background-color: #eaddcf;
+        border-right: 1px solid #d35400;
+    }
+    
+    /* 2. Navigation als große Buttons stylen */
+    [data-testid="stSidebar"] [data-testid="stRadio"] > div {
+        gap: 12px; /* Abstand zwischen den Buttons */
+    }
+    
+    [data-testid="stSidebar"] [data-testid="stRadio"] label {
+        background-color: #fffaf0 !important;
+        border: 2px solid #d35400 !important;
+        padding: 15px !important; /* Viel Platz für den Finger */
+        border-radius: 10px !important;
+        font-size: 1.1em !important;
+        font-weight: bold !important;
+        color: #4a3b2a !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+    }
+    
+    /* Aktiver Button / Hover */
+    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover,
+    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-checked="true"] {
+        background-color: #d35400 !important;
+        color: white !important;
+        transform: scale(1.02);
+    }
+
+    /* --- MOBILE CONTENT FIXES --- */
+    
+    /* Kacheln */
     [data-testid="stVerticalBlockBorderWrapper"] > div {
         background-color: #eaddcf;
         border-radius: 12px;
         border: 1px solid #d35400;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
-        padding: 10px; /* Etwas Padding innen */
+        padding: 10px;
     }
-
-    /* --- MOBILE FIXES --- */
     
-    /* Bilder zwingen klein zu bleiben (auch auf Handy) */
+    /* Bilder klein halten */
     div[data-testid="stImage"] img {
         width: 80px !important;
         max-width: 80px !important;
@@ -59,21 +104,8 @@ st.markdown("""
         box-shadow: 1px 1px 4px rgba(0,0,0,0.2);
     }
     
-    /* Spaltenabstand auf Handy verringern */
-    [data-testid="column"] {
-        padding: 0px !important;
-    }
-    
-    /* Sidebar Styling */
-    section[data-testid="stSidebar"] {
-        background-color: #eaddcf;
-        border-right: 1px solid #d35400;
-    }
-
-    /* Navigation Radio Buttons in Sidebar hübscher machen */
-    .stRadio > div {
-        background-color: transparent !important;
-    }
+    /* Spaltenabstand */
+    [data-testid="column"] { padding: 0px !important; }
     
     .stFeedback {
         padding-top: 0px !important;
@@ -270,15 +302,19 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
 
 # --- MAIN ---
 def main():
-    # --- SIDEBAR (Slide Menu auf Handy) ---
+    # --- SIDEBAR (Slide Menu) ---
     with st.sidebar:
-        st.title("Navigation")
-        if st.button("🚨 Cache Reset", help="Klicken, wenn Daten hängen"): 
-            st.session_state.clear(); st.rerun()
+        st.title("Menü")
+        
+        # Navigation (Große Buttons via CSS)
+        nav = st.radio("Navigation", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"], label_visibility="collapsed")
         
         st.markdown("---")
-        nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"])
-        st.markdown("---")
+        
+        # Cache Reset (Ganz unten, kleiner)
+        # Wir nutzen einen Container/Spacer, falls nötig, aber "---" reicht meist als Trenner
+        if st.button("🔄 Cache leeren", help="Klicken, wenn Daten hängen oder fehlen", type="secondary"): 
+            st.session_state.clear(); st.rerun()
         
     st.title("📚 Meine Bibliothek")
     
@@ -327,7 +363,7 @@ def main():
 
     # --- TAB: SAMMLUNG ---
     elif nav == "🔍 Sammlung":
-        # Ansicht-Schalter in die Sidebar für Clean Look
+        # Ansicht-Schalter in Sidebar
         with st.sidebar:
             st.markdown("### Ansicht")
             view = st.radio("Modus", ["Liste", "Kacheln"], label_visibility="collapsed")
@@ -346,7 +382,6 @@ def main():
         except: pass
         df_show = df_show.sort_values(by="Hinzugefügt", ascending=False)
 
-        # --- LISTE ---
         if view == "Liste":
             df_editor = df_show[["Titel", "Autor", "Bewertung", "Cover", "Notiz", "Hinzugefügt"]].copy()
             df_editor["Löschen"] = False 
@@ -357,7 +392,7 @@ def main():
                 column_config={
                     "Titel": st.column_config.TextColumn(disabled=True),
                     "Autor": st.column_config.TextColumn("Autor"),
-                    "Bewertung": st.column_config.NumberColumn("⭐", min_value=1, max_value=5, step=1, help="Wert von 1-5"),
+                    "Bewertung": st.column_config.NumberColumn("⭐", min_value=1, max_value=5, step=1),
                     "Cover": st.column_config.ImageColumn("Img", width="small"),
                     "Notiz": st.column_config.TextColumn("Notiz (Editierbar)", width="large"),
                     "Hinzugefügt": st.column_config.DateColumn("Datum", disabled=True, format="DD.MM.YYYY"),
@@ -374,16 +409,11 @@ def main():
                         del st.session_state.df_books
                         st.success("Gespeichert!")
                         time.sleep(1); st.rerun()
-
-        # --- KACHELN ---
         else:
-            # 3 Spalten auf Desktop, Streamlit macht auf Mobile automatisch 1 daraus (Stacking)
             cols = st.columns(3) 
             for i, (idx, row) in enumerate(df_show.iterrows()):
                 with cols[i % 3]:
                     with st.container(border=True):
-                        # Auch hier Columns: Auf Desktop nebeneinander, auf Mobile untereinander
-                        # ABER: Unser CSS zwingt das Bild klein zu bleiben!
                         c_img, c_info = st.columns([1, 2])
                         with c_img:
                             cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
@@ -391,13 +421,9 @@ def main():
                             try: stars = int(row["Bewertung"])
                             except: stars = 0
                             
-                            default_idx = stars - 1 if stars > 0 else None
-                            # Widget Key muss einzigartig sein
                             w_key = f"star_widget_{idx}"
-                            
                             new_rating_idx = st.feedback("stars", key=w_key)
                             
-                            # Logik für Auto-Save Rating
                             if w_key in st.session_state and st.session_state[w_key] is not None:
                                 user_val = st.session_state[w_key] + 1
                                 if user_val != stars:
@@ -406,28 +432,23 @@ def main():
                                     del st.session_state.df_books
                                     time.sleep(0.5); st.rerun()
                             elif stars > 0 and new_rating_idx is None:
-                                # Fallback Anzeige für Mobile wenn Widget zickt
                                 pass 
 
                         with c_info:
                             st.subheader(row["Titel"])
                             st.caption(row["Autor"])
-                            
                             current_note = row["Notiz"]
                             new_note = st.text_area("Notiz", value=current_note, key=f"note_area_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz...")
-                            
                             if new_note != current_note:
                                 update_single_entry(ws_books, row["Titel"], "Notiz", new_note)
                                 st.toast(f"Notiz gespeichert!")
                                 del st.session_state.df_books
-                                time.sleep(0.5)
-                                st.rerun()
+                                time.sleep(0.5); st.rerun()
 
     # --- TAB: MERKLISTE ---
     elif nav == "🔮 Merkliste":
-        # Ansicht Schalter auch hier in Sidebar (globaler Switch wäre möglich, aber so flexibler)
         with st.sidebar:
-            st.markdown("### Wunschliste Ansicht")
+            st.markdown("### Ansicht")
             w_view = st.radio("Modus ", ["Liste", "Kacheln"], label_visibility="collapsed", key="w_view")
 
         st.header("Wunschliste")
@@ -474,7 +495,6 @@ def main():
                                     del st.session_state.df_books
                                     time.sleep(0.5); st.rerun()
             else:
-                # Liste
                 for i, r in df_w.iterrows():
                     with st.container(border=True):
                         c1, c2, c3 = st.columns([1,4,1])
