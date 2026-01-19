@@ -227,49 +227,21 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- INTELLIGENTE MODELLSUCHE (REST API) ---
-@st.cache_data(show_spinner=False)
-def find_working_model():
-    """Fragt die API, welche Modelle verfügbar sind und gibt das beste zurück"""
-    if "gemini_api_key" not in st.secrets: return None
-    api_key = st.secrets["gemini_api_key"]
-    
-    # 1. Liste aller Modelle abrufen
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        r = requests.get(url)
-        if r.status_code != 200: return "gemini-1.5-flash" # Fallback
-        
-        data = r.json()
-        models = [m['name'].replace('models/', '') for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-        
-        # 2. Das beste Modell auswählen (Priorität: Flash -> Pro -> Irgendwas)
-        # Wir suchen KEIN 2.5, um sicherzugehen!
-        for m in models:
-            if "flash" in m and "1.5" in m: return m
-        for m in models:
-            if "pro" in m and "1.5" in m: return m
-        for m in models:
-            if "1.0" in m and "pro" in m: return m
-            
-        return models[0] if models else "gemini-1.5-flash"
-    except:
-        return "gemini-1.5-flash" # Harter Fallback
-
-# --- KI AUFRUF (REST API) ---
+# --- REST API AUFRUF (DIAGNOSE MODUS) ---
 def call_gemini_direct(prompt):
     if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
     api_key = st.secrets["gemini_api_key"]
     
-    # Finde das richtige Modell für diesen API Key
-    model_name = find_working_model()
+    # WIR ERZWINGEN JETZT DAS STABILE 1.5 FLASH
+    MODEL_NAME = "gemini-1.5-flash" 
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
         response = requests.post(url, headers=headers, json=data)
+        
         if response.status_code == 200:
             result = response.json()
             try:
@@ -277,8 +249,11 @@ def call_gemini_direct(prompt):
                 clean_text = text.replace("```json", "").replace("```", "").strip()
                 return clean_text, None
             except: return None, "Leere Antwort"
-        elif response.status_code == 429: return None, "Rate Limit"
-        else: return None, f"Fehler {response.status_code} ({model_name})"
+        elif response.status_code == 429:
+            return None, f"Rate Limit erreicht bei Modell: {MODEL_NAME}"
+        else:
+            return None, f"Fehler {response.status_code} ({MODEL_NAME}): {response.text[:100]}..."
+            
     except Exception as e: return None, str(e)
 
 @st.cache_data(show_spinner=False)
@@ -327,9 +302,10 @@ def batch_enrich_books(ws, df):
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
         
+        # KI Call
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
         
-        # Leere Ergebnisse ignorieren
+        # Wenn leer wegen Fehler/Limit
         if not ai_res.get("tags") and not ai_res.get("year"):
             time.sleep(2)
             continue
@@ -344,7 +320,7 @@ def batch_enrich_books(ws, df):
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        time.sleep(5.0) 
+        time.sleep(6.0) # 6 Sekunden Pause = max 10 Anfragen pro Minute (Limit = 15)
         
     status_text.success(f"Fertig! {count} Bücher aktualisiert.")
     time.sleep(2)
@@ -408,7 +384,6 @@ def show_book_details(book, ws_books, ws_authors):
     with d_tab1:
         st.markdown(f"### {book['Titel']}")
         
-        # SICHERE ABFRAGE DES JAHRES
         year_val = book.get('Erschienen')
         year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
         st.markdown(f"**von {book['Autor']}{year_str}**")
