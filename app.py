@@ -254,9 +254,11 @@ def get_ai_tags_and_year(titel, autor):
     2. Gib mir das Erscheinungsjahr (YYYY).
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
-    text, err = safe_generate(prompt)
-    if not text: return {"tags": "", "year": ""}
-    try: return json.loads(text)
+    
+    raw_text, err = safe_generate(prompt)
+    if not raw_text: return {"tags": "", "year": ""}
+    
+    try: return json.loads(raw_text)
     except: return {"tags": "", "year": ""}
 
 @st.cache_data(show_spinner=False)
