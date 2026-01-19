@@ -217,8 +217,8 @@ def get_ai_book_info(titel, autor):
     
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
-        # MODELL WECHSEL AUF GEMINI-PRO (Stabiler)
-        model = genai.GenerativeModel('gemini-pro') 
+        # WICHTIG: Wir nutzen jetzt das Modell, das mit der neuen Library funktioniert
+        model = genai.GenerativeModel('gemini-1.5-flash') 
         
         prompt = f"""
         Du bist ein literarischer Assistent.
@@ -235,7 +235,7 @@ def get_ai_book_info(titel, autor):
         return json.loads(text)
         
     except Exception as e:
-        return {"teaser": f"KI-Fehler: {str(e)}", "bio": "Bitte Key prüfen."}
+        return {"teaser": f"KI-Fehler: {str(e)}", "bio": "Bitte requirements.txt prüfen."}
 
 def smart_author(short, known):
     s = short.strip().lower()
