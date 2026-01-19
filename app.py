@@ -212,16 +212,14 @@ def fetch_meta(titel, autor):
 @st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
     """Fragt Google Gemini nach einer Zusammenfassung und Bio"""
-    # 1. Check ob Key existiert
     if "gemini_api_key" not in st.secrets:
         return {"teaser": "Fehler: 'gemini_api_key' fehlt in Secrets.", "bio": "-"}
     
     try:
-        # 2. Konfiguration
         genai.configure(api_key=st.secrets["gemini_api_key"])
-        model = genai.GenerativeModel('gemini-1.5-flash') 
+        # MODELL WECHSEL AUF GEMINI-PRO (Stabiler)
+        model = genai.GenerativeModel('gemini-pro') 
         
-        # 3. Prompt senden
         prompt = f"""
         Du bist ein literarischer Assistent.
         Buch: "{titel}" von {autor}.
@@ -232,14 +230,11 @@ def get_ai_book_info(titel, autor):
         Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
         """
         response = model.generate_content(prompt)
-        
-        # 4. JSON parsen (Clean)
         text = response.text.replace("```json", "").replace("```", "").strip()
         import json
         return json.loads(text)
         
     except Exception as e:
-        # 5. Echten Fehler zurückgeben für Debugging
         return {"teaser": f"KI-Fehler: {str(e)}", "bio": "Bitte Key prüfen."}
 
 def smart_author(short, known):
