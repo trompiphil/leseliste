@@ -158,14 +158,12 @@ def get_data(ws):
                 idx = h_map.get(c.lower())
                 val = r[idx] if idx is not None and idx < len(r) else ""
                 d[c] = val
-            
             try:
                 raw_val = d["Bewertung"]
                 if isinstance(raw_val, str) and raw_val.strip().isdigit(): d["Bewertung"] = int(raw_val)
                 elif isinstance(raw_val, (int, float)): d["Bewertung"] = int(raw_val)
                 else: d["Bewertung"] = 0
             except: d["Bewertung"] = 0
-            
             if not d["Status"]: d["Status"] = "Gelesen"
             if d["Titel"]: data.append(d)
         return pd.DataFrame(data)
@@ -235,9 +233,9 @@ def call_gemini_safe(model, prompt):
     try:
         return model.generate_content(prompt)
     except Exception as e:
-        if "429" in str(e): # Limit reached
-            return None # Signalisiert "Pause machen"
-        raise e
+        # Fängt Quote Exceeded Fehler ab
+        if "429" in str(e): return None
+        return None
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
@@ -245,14 +243,19 @@ def get_ai_tags_and_year(titel, autor):
     
     genai.configure(api_key=st.secrets["gemini_api_key"])
     
-    # Modellwahl: Bevorzuge Flash, sonst irgendwas
-    all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    selected = next((m for m in all_models if "flash" in m), None)
-    if not selected: selected = all_models[0] if all_models else None
+    # WIR NEHMEN JETZT HARTCODIERT DAS STABILE MODELL
+    # Um zu verhindern, dass er "2.5" oder andere experimentelle nimmt
+    model_name = "models/gemini-1.5-flash"
     
-    if not selected: return {"tags": "", "year": ""}
+    # Fallback Suche, falls der harte Name fehlschlägt
+    try:
+        model = genai.GenerativeModel(model_name)
+    except:
+        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Suche nach Flash, aber vermeide 2.5 falls möglich, sonst nimm Pro
+        selected = next((m for m in all_models if "flash" in m and "1.5" in m), all_models[0] if all_models else None)
+        model = genai.GenerativeModel(selected)
 
-    model = genai.GenerativeModel(selected)
     prompt = f"""
     Buch: "{titel}" von {autor}.
     Aufgabe: 
@@ -261,13 +264,12 @@ def get_ai_tags_and_year(titel, autor):
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
     
-    # Versuch mit Retry
+    response = call_gemini_safe(model, prompt)
+    
+    if response is None:
+        return None # Signalisiert "Limit erreicht"
+        
     try:
-        response = call_gemini_safe(model, prompt)
-        if response is None: # 429 Error
-            time.sleep(20) # Lange Pause
-            response = model.generate_content(prompt) # 2. Versuch
-            
         text = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
     except:
@@ -289,51 +291,59 @@ def batch_enrich_books(ws, df):
     
     count = 0
     total = len(df_missing)
+    limit_reached = False
     
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
         
-        # KI Call (mit eingebautem Retry wenn nötig)
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
+        
+        if ai_res is None:
+            limit_reached = True
+            break # Schleife beenden, Daten sichern, Nutzer warnen
         
         try:
             cell = ws.find(row["Titel"])
             current_tags = row["Tags"]
             current_year = row["Erschienen"]
-            
             if not current_tags and ai_res.get("tags"): ws.update_cell(cell.row, col_tag_idx, ai_res["tags"])
             if not current_year and ai_res.get("year"): ws.update_cell(cell.row, col_year_idx, ai_res["year"])
             count += 1
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        # WICHTIG: 5 Sekunden Pause zwischen den Büchern um Limit zu respektieren (15 req/min)
-        time.sleep(5.0) 
+        time.sleep(2.0) # Pause
         
-    status_text.text("Fertig!")
-    time.sleep(1)
-    status_text.empty()
     progress_bar.empty()
+    
+    if limit_reached:
+        status_text.warning(f"🛑 Tageslimit erreicht! {count} Bücher geschafft. Morgen geht's weiter.")
+        time.sleep(5)
+    else:
+        status_text.success("Fertig!")
+        time.sleep(1)
+        
+    status_text.empty()
     return count
 
 @st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
     if "gemini_api_key" not in st.secrets:
-        return {"teaser": "Fehler: 'gemini_api_key' fehlt in Secrets.", "bio": "-"}
+        return {"teaser": "Fehler: Key fehlt.", "bio": "-"}
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
-        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        selected = next((m for m in all_models if "flash" in m), None) # Breitere Suche nach Flash
-        if not selected: selected = all_models[0] if all_models else None
+        # Auch hier: Hardcoded auf stabil
+        model = genai.GenerativeModel("models/gemini-1.5-flash")
         
-        model = genai.GenerativeModel(selected)
         prompt = f"""
         Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
         Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
         Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
         Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
         """
-        response = model.generate_content(prompt)
+        response = call_gemini_safe(model, prompt)
+        if response is None: return {"teaser": "Tageslimit erreicht. Bitte morgen probieren.", "bio": "-"}
+        
         text = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
     except Exception as e:
@@ -444,7 +454,6 @@ def show_book_details(book, ws_books, ws_authors):
             new_title = st.text_input("Titel", value=book["Titel"])
             new_author = st.text_input("Autor", value=book["Autor"])
             
-            # Sicherer Umgang mit fehlendem Key
             current_y = book.get("Erschienen", "")
             new_year = st.text_input("Erscheinungsjahr", value=current_y)
             
@@ -518,7 +527,7 @@ def main():
                 st.success(f"{count} Bücher aktualisiert!")
                 del st.session_state.df_books
                 time.sleep(2); st.rerun()
-            else: st.info("Alles aktuell.")
+            else: pass # Nichts zu tun oder Limit
 
     tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik & Autoren"])
     
@@ -538,10 +547,9 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Lade Metadaten (inkl. Jahr & Tags)..."):
                         c, g, y = fetch_meta(t, fa)
-                        # KI Tags
                         ai_res = get_ai_tags_and_year(t, fa)
-                        tags = ai_res["tags"]
-                        if not y: y = ai_res["year"]
+                        tags = ai_res["tags"] if ai_res else ""
+                        if not y and ai_res: y = ai_res["year"]
                         
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", tags, y])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
@@ -586,7 +594,6 @@ def main():
                             if st.button("ℹ️ Info", key=f"k_{idx}"): show_book_details(row, ws_books, ws_authors)
                         with c2:
                             st.write(f"**{row['Titel']}**")
-                            # Anzeige Jahr und Tags
                             meta_line = row["Autor"]
                             if row.get("Erschienen"): meta_line += f" ({row['Erschienen']})"
                             if "Tags" in row and row["Tags"]: 
@@ -622,8 +629,8 @@ def main():
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         c, g, y = fetch_meta(t, a)
                         ai_res = get_ai_tags_and_year(t, a)
-                        tags = ai_res["tags"]
-                        if not y: y = ai_res["year"]
+                        tags = ai_res["tags"] if ai_res else ""
+                        if not y and ai_res: y = ai_res["year"]
                         ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", tags, y])
                         del st.session_state.df_books; st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
         
