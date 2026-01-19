@@ -10,7 +10,7 @@ from deep_translator import GoogleTranslator
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide")
 
-# --- CSS DESIGN (MOBILE OPTIMIZED v2) ---
+# --- CSS DESIGN (TABS & MOBILE) ---
 st.markdown("""
     <style>
     /* Globaler Reset */
@@ -24,7 +24,7 @@ st.markdown("""
         color: #000000 !important;
     }
     
-    /* Buttons (Global) */
+    /* Buttons */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -36,51 +36,32 @@ st.markdown("""
         background-color: #e67e22 !important;
     }
 
-    /* --- SIDEBAR STYLING (Das "Menü") --- */
-    
-    /* 1. Den Menü-Pfeil oben links sichtbar machen (Fake Hamburger Button) */
-    [data-testid="stSidebarCollapsedControl"] {
-        background-color: #d35400 !important;
-        color: white !important;
-        border-radius: 8px;
-        padding: 4px;
-        border: 2px solid white;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
-    }
-    
-    /* Sidebar Hintergrund */
-    section[data-testid="stSidebar"] {
-        background-color: #eaddcf;
-        border-right: 1px solid #d35400;
-    }
-    
-    /* 2. Navigation als große Buttons stylen */
-    [data-testid="stSidebar"] [data-testid="stRadio"] > div {
-        gap: 12px; /* Abstand zwischen den Buttons */
-    }
-    
-    [data-testid="stSidebar"] [data-testid="stRadio"] label {
-        background-color: #fffaf0 !important;
-        border: 2px solid #d35400 !important;
-        padding: 15px !important; /* Viel Platz für den Finger */
-        border-radius: 10px !important;
-        font-size: 1.1em !important;
-        font-weight: bold !important;
-        color: #4a3b2a !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        transition: all 0.2s;
-        display: flex;
-        align-items: center;
-    }
-    
-    /* Aktiver Button / Hover */
-    [data-testid="stSidebar"] [data-testid="stRadio"] label:hover,
-    [data-testid="stSidebar"] [data-testid="stRadio"] label[data-checked="true"] {
-        background-color: #d35400 !important;
-        color: white !important;
-        transform: scale(1.02);
+    /* --- TABS STYLING (App-Feeling) --- */
+    /* Tab-Leiste Hintergrund */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+        background-color: transparent;
+        padding-bottom: 5px;
     }
 
+    /* Inaktive Tabs */
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        background-color: #eaddcf;
+        border-radius: 8px;
+        border: 1px solid #d35400;
+        color: #4a3b2a;
+        font-weight: bold;
+        padding: 0 20px; /* Breite Tabs */
+    }
+
+    /* Aktiver Tab */
+    .stTabs [aria-selected="true"] {
+        background-color: #d35400 !important;
+        color: white !important;
+        border-color: #d35400 !important;
+    }
+    
     /* --- MOBILE CONTENT FIXES --- */
     
     /* Kacheln */
@@ -302,18 +283,10 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
 
 # --- MAIN ---
 def main():
-    # --- SIDEBAR (Slide Menu) ---
+    # --- SIDEBAR (Nur für Settings) ---
     with st.sidebar:
-        st.title("Menü")
-        
-        # Navigation (Große Buttons via CSS)
-        nav = st.radio("Navigation", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"], label_visibility="collapsed")
-        
-        st.markdown("---")
-        
-        # Cache Reset (Ganz unten, kleiner)
-        # Wir nutzen einen Container/Spacer, falls nötig, aber "---" reicht meist als Trenner
-        if st.button("🔄 Cache leeren", help="Klicken, wenn Daten hängen oder fehlen", type="secondary"): 
+        st.write("🔧 **Einstellungen**")
+        if st.button("🔄 Cache leeren", help="Klicken, wenn Daten hängen"): 
             st.session_state.clear(); st.rerun()
         
     st.title("📚 Meine Bibliothek")
@@ -330,8 +303,11 @@ def main():
     df = st.session_state.df_books
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
+    # --- NAVIGATION: TABS ---
+    tab_neu, tab_sammlung, tab_merkliste, tab_autoren = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"])
+    
     # --- TAB: NEU (GELESEN) ---
-    if nav == "✍️ Neu (Gelesen)":
+    with tab_neu:
         st.header("Buch hinzufügen")
         
         with st.form("add_book_form", clear_on_submit=True):
@@ -362,18 +338,14 @@ def main():
                     st.error("Formatfehler: Bitte 'Titel, Autor' eingeben.")
 
     # --- TAB: SAMMLUNG ---
-    elif nav == "🔍 Sammlung":
-        # Ansicht-Schalter in Sidebar
-        with st.sidebar:
-            st.markdown("### Ansicht")
-            view = st.radio("Modus", ["Liste", "Kacheln"], label_visibility="collapsed")
-
-        st.header("Gelesene Bücher")
+    with tab_sammlung:
+        # Ansicht-Schalter (Horizontal, sauber)
+        view = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed")
         
         df_show = st.session_state.df_books.copy()
         df_show = df_show[ (df_show["Status"] == "Gelesen") ]
         
-        q = st.text_input("🔍 Filter (Titel, Autor, Notiz...)", label_visibility="collapsed", placeholder="Suchen...")
+        q = st.text_input("🔍 Filter (Titel, Autor, Notiz...)", placeholder="Suchen...")
         if q:
             q = q.lower()
             df_show = df_show[df_show["Titel"].str.lower().str.contains(q) | df_show["Autor"].str.lower().str.contains(q) | df_show["Notiz"].str.lower().str.contains(q)]
@@ -410,6 +382,7 @@ def main():
                         st.success("Gespeichert!")
                         time.sleep(1); st.rerun()
         else:
+            # KACHEL ANSICHT
             cols = st.columns(3) 
             for i, (idx, row) in enumerate(df_show.iterrows()):
                 with cols[i % 3]:
@@ -446,12 +419,9 @@ def main():
                                 time.sleep(0.5); st.rerun()
 
     # --- TAB: MERKLISTE ---
-    elif nav == "🔮 Merkliste":
-        with st.sidebar:
-            st.markdown("### Ansicht")
-            w_view = st.radio("Modus ", ["Liste", "Kacheln"], label_visibility="collapsed", key="w_view")
+    with tab_merkliste:
+        w_view = st.radio("Ansicht Merkliste", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed", key="w_view")
 
-        st.header("Wunschliste")
         with st.expander("➕ Neuen Wunsch hinzufügen", expanded=False):
             with st.form("wish_form", clear_on_submit=True):
                 i_w = st.text_input("Titel, Autor")
@@ -512,7 +482,7 @@ def main():
         else: st.info("Merkliste leer.")
 
     # --- TAB: AUTOREN ---
-    elif nav == "👥 Autoren":
+    with tab_autoren:
         st.header("Autoren Statistik")
         df = st.session_state.df_books
         df_read = df[df["Status"] != "Wunschliste"]
