@@ -7,6 +7,7 @@ import time
 import urllib.parse
 from datetime import datetime
 from deep_translator import GoogleTranslator
+import google.generativeai as genai
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide")
@@ -43,7 +44,7 @@ st.markdown("""
         padding: 10px;
     }
 
-    /* --- MOBILE & TABS --- */
+    /* --- TABS & MOBILE --- */
     .stTabs [data-baseweb="tab-list"] {
         gap: 10px;
         background-color: transparent;
@@ -64,7 +65,6 @@ st.markdown("""
         border-color: #d35400 !important;
     }
     
-    /* Bilder klein halten */
     div[data-testid="stImage"] img {
         width: 80px !important;
         max-width: 80px !important;
@@ -84,14 +84,20 @@ st.markdown("""
         justify-content: center;
     }
     
-    /* Links im Detail-View */
     a.external-link {
         text-decoration: none;
         font-weight: bold;
         color: #d35400 !important;
     }
-    a.external-link:hover {
-        text-decoration: underline;
+    a.external-link:hover { text-decoration: underline; }
+    
+    /* Box für AI Content */
+    .ai-box {
+        background-color: #fff8e1;
+        border-left: 4px solid #d35400;
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 15px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -184,7 +190,7 @@ def update_full_dataframe(ws, new_df):
     for r in rows_to_delete: ws.delete_rows(r); time.sleep(0.5)
     return True
 
-# --- API & INFO HELPER ---
+# --- API & KI HELPER ---
 def process_genre(raw):
     if not raw: return "Roman"
     try: 
@@ -207,18 +213,37 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g
 
-def fetch_detailed_info(titel, autor):
-    """Holt Klappentext und Details für die Detail-Seite"""
-    details = {"desc": "Keine Beschreibung verfügbar.", "pages": "?", "published": "?"}
+# --- NEU: GEMINI AI ---
+@st.cache_data(show_spinner=False)
+def get_ai_book_info(titel, autor):
+    """Fragt Google Gemini nach einer Zusammenfassung und Bio"""
+    if "gemini_api_key" not in st.secrets:
+        return None
+    
     try:
-        r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q={titel} {autor}&langRestrict=de&maxResults=1").json()
-        if "items" in r:
-            info = r["items"][0]["volumeInfo"]
-            details["desc"] = info.get("description", "Keine Beschreibung gefunden.")
-            details["pages"] = info.get("pageCount", "?")
-            details["published"] = info.get("publishedDate", "?")
-    except: pass
-    return details
+        genai.configure(api_key=st.secrets["gemini_api_key"])
+        model = genai.GenerativeModel('gemini-1.5-flash') # Schnelles Modell
+        
+        prompt = f"""
+        Du bist ein literarischer Assistent.
+        Buch: "{titel}" von {autor}.
+        
+        Aufgabe 1: Schreibe einen spannenden Teaser/Zusammenfassung über den Inhalt (max 80 Wörter). Keine Spoiler!
+        Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
+        
+        Antworte im JSON Format:
+        {{
+            "teaser": "Hier der Teaser...",
+            "bio": "Hier die Bio..."
+        }}
+        """
+        response = model.generate_content(prompt)
+        # Simple JSON extraction (falls Modell Markdown drumrum packt)
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        import json
+        return json.loads(text)
+    except Exception as e:
+        return {"teaser": "KI konnte keine Infos laden.", "bio": "Keine Bio verfügbar."}
 
 def smart_author(short, known):
     s = short.strip().lower()
@@ -286,11 +311,6 @@ def close_detail_view():
 def main():
     if "selected_book" not in st.session_state: st.session_state.selected_book = None
 
-    with st.sidebar:
-        st.write("🔧 **Einstellungen**")
-        if st.button("🔄 Cache leeren", help="Klicken, wenn Daten hängen"): 
-            st.session_state.clear(); st.rerun()
-        
     st.title("📚 Meine Bibliothek")
     
     client = get_connection()
@@ -305,7 +325,7 @@ def main():
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
     # -----------------------------------------------------------
-    # ANSICHT 1: DETAIL PAGE (Wenn ein Buch ausgewählt wurde)
+    # ANSICHT 1: DETAIL PAGE (AI POWERED)
     # -----------------------------------------------------------
     if st.session_state.selected_book is not None:
         book = st.session_state.selected_book
@@ -319,48 +339,57 @@ def main():
         
         with col1:
             cov = book["Cover"] if book["Cover"] != "-" else "https://via.placeholder.com/200x300?text=No+Cover"
-            # Hier Bild größer anzeigen
-            st.markdown(f'<img src="{cov}" style="width:100%; max-width:200px; border-radius:10px; box-shadow:3px 3px 10px rgba(0,0,0,0.2);">', unsafe_allow_html=True)
-            st.write("")
+            # Bild noch etwas größer/schöner
+            st.markdown(f'<img src="{cov}" style="width:100%; max-width:220px; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.3); margin-bottom:20px;">', unsafe_allow_html=True)
+            
             st.info(f"**Deine Bewertung:**\n\n{'★' * int(book['Bewertung'])}")
             
-        with col2:
-            # Live Fetching von Details
-            with st.spinner("Recherchiere Infos..."):
-                details = fetch_detailed_info(book["Titel"], book["Autor"])
-            
-            st.markdown("### 📖 Inhalt")
-            st.write(details["desc"])
-            
-            st.markdown("---")
-            c_a, c_b = st.columns(2)
-            c_a.metric("Seiten", details["pages"])
-            c_b.metric("Erschienen", details["published"])
-            
-            st.markdown("---")
+            # Notiz nur anzeigen, wenn vorhanden
             if book["Notiz"]:
-                st.markdown("### 📝 Deine Notiz")
-                st.success(book["Notiz"])
+                st.markdown("#### 📝 Deine Notiz")
+                st.write(f"*{book['Notiz']}*")
+            
+        with col2:
+            # KI GENERIERUNG
+            ai_data = None
+            if "gemini_api_key" in st.secrets:
+                with st.spinner("✨ Die KI liest das Buch gerade quer..."):
+                    ai_data = get_ai_book_info(book["Titel"], book["Autor"])
+            else:
+                st.warning("⚠️ Kein KI-Schlüssel gefunden. Füge 'gemini_api_key' in die Secrets ein für Zusammenfassungen.")
+
+            if ai_data:
+                st.markdown(f"""
+                <div class="ai-box">
+                    <h4>📖 Worum geht's?</h4>
+                    <p>{ai_data['teaser']}</p>
+                </div>
+                """, unsafe_allow_html=True)
                 
-            st.markdown("### 🔗 Links")
-            # Links generieren
+                st.markdown(f"""
+                <div class="ai-box" style="border-left-color: #2980b9; background-color: #eaf2f8;">
+                    <h4>👤 Über den Autor</h4>
+                    <p>{ai_data['bio']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("### 🔗 Recherche")
             wiki_book = f"https://de.wikipedia.org/w/index.php?search={urllib.parse.quote(book['Titel'])}"
             wiki_auth = f"https://de.wikipedia.org/w/index.php?search={urllib.parse.quote(book['Autor'])}"
             google_search = f"https://www.google.com/search?q={urllib.parse.quote(book['Titel'] + ' ' + book['Autor'])}"
             
             st.markdown(f"""
             * 🔍 [Google Suche]({google_search})
-            * 📖 [Wikipedia: Buch suchen]({wiki_book})
-            * 👤 [Wikipedia: Autor suchen]({wiki_auth})
+            * 📖 [Wikipedia: Buch]({wiki_book})
+            * 👤 [Wikipedia: Autor]({wiki_auth})
             """)
 
     # -----------------------------------------------------------
-    # ANSICHT 2: NORMALE TABS (Wenn kein Buch ausgewählt)
+    # ANSICHT 2: NORMALE TABS
     # -----------------------------------------------------------
     else:
         tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "📊 Statistik"])
         
-        # --- TAB: NEU ---
         with tab_neu:
             st.header("Buch hinzufügen")
             with st.form("add_book_form", clear_on_submit=True):
@@ -382,26 +411,22 @@ def main():
                             ws_books.append_row([tit, final_aut, gen, rating_val, cov or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen"])
                             cleanup_author_duplicates_batch(ws_books, ws_authors)
                             del st.session_state.df_books 
-                        st.success(f"Gespeichert: {tit}")
-                        time.sleep(1); st.rerun()
-                    else: st.error("Formatfehler: Bitte 'Titel, Autor' eingeben.")
+                        st.success(f"Gespeichert: {tit}"); time.sleep(1); st.rerun()
+                    else: st.error("Formatfehler.")
 
-        # --- TAB: SAMMLUNG ---
         with tab_sammlung:
             view = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed")
             df_show = df[ (df["Status"] == "Gelesen") ].copy()
-            
             q = st.text_input("🔍 Filter (Titel, Autor, Notiz...)", placeholder="Suchen...")
             if q:
                 q = q.lower()
                 df_show = df_show[df_show["Titel"].str.lower().str.contains(q) | df_show["Autor"].str.lower().str.contains(q) | df_show["Notiz"].str.lower().str.contains(q)]
-
+            
             try: df_show["Hinzugefügt"] = pd.to_datetime(df_show["Hinzugefügt"], errors='coerce')
             except: pass
             df_show = df_show.sort_values(by="Hinzugefügt", ascending=False)
 
             if view == "Liste":
-                # Button Spalte für Details hinzufügen
                 for i, row in df_show.iterrows():
                     c1, c2, c3, c4 = st.columns([2,2,1,2])
                     c1.write(f"**{row['Titel']}**")
@@ -418,10 +443,7 @@ def main():
                             with c_img:
                                 cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
                                 st.image(cov, use_container_width=True)
-                                
-                                # Details Button (klein unter Bild)
                                 if st.button("ℹ️ Info", key=f"kd_{idx}"): open_detail_view(row)
-
                                 try: stars = int(row["Bewertung"])
                                 except: stars = 0
                                 w_key = f"star_widget_{idx}"
@@ -430,8 +452,7 @@ def main():
                                     user_val = st.session_state[w_key] + 1
                                     if user_val != stars:
                                         update_single_entry(ws_books, row["Titel"], "Bewertung", user_val)
-                                        st.toast(f"Gespeichert: {user_val} Sterne"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
-
+                                        st.toast(f"Gespeichert!"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
                             with c_info:
                                 st.subheader(row["Titel"])
                                 st.caption(row["Autor"])
@@ -439,9 +460,8 @@ def main():
                                 new_note = st.text_area("Notiz", value=current_note, key=f"note_area_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz...")
                                 if new_note != current_note:
                                     update_single_entry(ws_books, row["Titel"], "Notiz", new_note)
-                                    st.toast(f"Notiz gespeichert!"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
+                                    st.toast(f"Gespeichert!"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
 
-        # --- TAB: MERKLISTE ---
         with tab_merkliste:
             w_view = st.radio("Ansicht Merkliste", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed", key="w_view")
             with st.expander("➕ Neuen Wunsch hinzufügen", expanded=False):
@@ -482,7 +502,7 @@ def main():
                                     new_n = st.text_area("Notiz", value=current_n, key=f"wnote_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz...")
                                     if new_n != current_n:
                                         update_single_entry(ws_books, row["Titel"], "Notiz", new_n)
-                                        st.toast("Notiz gespeichert!"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
+                                        st.toast("Gespeichert!"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
                 else:
                     for i, r in df_w.iterrows():
                         c1, c2, c3, c4 = st.columns([1,3,1,1])
@@ -497,24 +517,19 @@ def main():
                             del st.session_state.df_books; st.rerun()
             else: st.info("Merkliste leer.")
 
-        # --- TAB: STATISTIK ---
         with tab_stats:
             st.header("📊 Deine Lesestatistik")
             df_read = df[df["Status"] != "Wunschliste"]
             df_wish = df[df["Status"] == "Wunschliste"]
-            
             c1, c2, c3 = st.columns(3)
             c1.metric("Gelesene Bücher", len(df_read))
             c2.metric("Auf der Wunschliste", len(df_wish))
-            
             top_author = "Noch niemand"
             if not df_read.empty:
                 top_author = df_read["Autor"].mode()[0]
                 count = df_read[df_read["Autor"]==top_author].shape[0]
                 c3.metric("Lieblingsautor", top_author, f"{count} Bücher")
-            
             st.markdown("---")
-            st.subheader("Top Autoren")
             if not df_read.empty:
                 auth_counts = df_read["Autor"].value_counts().reset_index()
                 auth_counts.columns = ["Autor", "Anzahl Bücher"]
