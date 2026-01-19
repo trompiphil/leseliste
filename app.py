@@ -98,6 +98,19 @@ st.markdown("""
         border-radius: 5px;
         margin-bottom: 15px;
     }
+
+    /* TAGS STYLING */
+    .book-tag {
+        display: inline-block;
+        background-color: #d35400;
+        color: white !important;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.75em;
+        margin-right: 5px;
+        margin-bottom: 5px;
+        font-weight: bold;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -127,7 +140,8 @@ def check_structure(ws):
     try:
         head = ws.row_values(1)
         if not head: ws.update_cell(1,1,"Titel"); head=["Titel"]
-        needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status"]
+        # JETZT NEU: TAGS SPALTE
+        needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags"]
         next_c = len(head)+1
         for n in needed:
             if not any(h.lower()==n.lower() for h in head):
@@ -135,7 +149,8 @@ def check_structure(ws):
     except: pass
 
 def get_data(ws):
-    cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status"]
+    # JETZT NEU: TAGS SPALTE LADEN
+    cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags"]
     try:
         raw = ws.get_all_values()
         if len(raw) < 2: return pd.DataFrame(columns=cols)
@@ -148,7 +163,6 @@ def get_data(ws):
                 val = r[idx] if idx is not None and idx < len(r) else ""
                 d[c] = val
             
-            # Robuste Konvertierung für Bewertung
             try:
                 raw_val = d["Bewertung"]
                 if isinstance(raw_val, str) and raw_val.strip().isdigit():
@@ -186,12 +200,9 @@ def update_full_dataframe(ws, new_df):
     col_idx = {k: headers.index(k) for k in ["titel","autor","bewertung","notiz","status"] if k in headers}
     if not col_idx: return False
     
-    # Simple Update Logic based on Title Match
-    # Note: Bulk Update via Loop (Optimization possible but okay for small libraries)
     for index, row in new_df.iterrows():
         try:
             cell = ws.find(row["Titel"])
-            # Update fields
             if "Bewertung" in row: ws.update_cell(cell.row, col_idx["bewertung"]+1, row["Bewertung"])
             if "Notiz" in row: ws.update_cell(cell.row, col_idx["notiz"]+1, row["Notiz"])
             time.sleep(0.2)
@@ -222,18 +233,36 @@ def fetch_meta(titel, autor):
     return c, g
 
 @st.cache_data(show_spinner=False)
+def get_ai_tags(titel, autor):
+    """Generiert Tags (ohne Cache hier, da beim Speichern genutzt)"""
+    if "gemini_api_key" not in st.secrets: return ""
+    try:
+        genai.configure(api_key=st.secrets["gemini_api_key"])
+        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        selected = next((m for m in all_models if "flash" in m and "1.5" in m), None)
+        if not selected: selected = next((m for m in all_models if "pro" in m and "1.5" in m), all_models[0] if all_models else None)
+        
+        model = genai.GenerativeModel(selected)
+        prompt = f"""
+        Buch: "{titel}" von {autor}.
+        Gib mir exakt 3-5 kurze Tags (Themen/Stimmung) als kommaseparierte Liste. 
+        Beispiele: #Düster, #Humorvoll, #HighFantasy, #Plottwist
+        Antworte NUR mit den Tags.
+        """
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except: return ""
+
+@st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
     if "gemini_api_key" not in st.secrets:
         return {"teaser": "Fehler: 'gemini_api_key' fehlt in Secrets.", "bio": "-"}
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
         all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
         selected = next((m for m in all_models if "flash" in m and "1.5" in m), None)
         if not selected: selected = next((m for m in all_models if "pro" in m and "1.5" in m), all_models[0] if all_models else None)
         
-        if not selected: return {"teaser": "Keine KI verfügbar", "bio": "-"}
-
         model = genai.GenerativeModel(selected)
         prompt = f"""
         Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
@@ -254,7 +283,6 @@ def smart_author(short, known):
     return short
 
 def cleanup_author_duplicates_batch(ws_books, ws_authors):
-    # (Identisch zur Vorversion - hält die Autorenliste sauber)
     import unicodedata
     def deep_clean(text): return unicodedata.normalize('NFKC', str(text)).replace('\u00A0', ' ').strip()
     books_vals = ws_books.get_all_values()
@@ -297,12 +325,10 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     return 1
 
 # --- DIALOG (MIT EDITIER-FUNKTION) ---
-@st.dialog("📖 Buch-Details & Bearbeitung")
+@st.dialog("📖 Buch-Details")
 def show_book_details(book, ws_books, ws_authors):
-    # Tabs im Dialog für Ordnung
     d_tab1, d_tab2 = st.tabs(["ℹ️ Info", "✏️ Bearbeiten"])
     
-    # --- TAB 1: INFOS ---
     with d_tab1:
         st.markdown(f"### {book['Titel']}")
         st.markdown(f"**von {book['Autor']}**")
@@ -314,6 +340,15 @@ def show_book_details(book, ws_books, ws_authors):
             st.write("")
             if book.get('Bewertung'):
                 st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
+            
+            # --- TAGS ANZEIGEN ---
+            if "Tags" in book and book["Tags"]:
+                st.write("")
+                tags_list = book["Tags"].split(",")
+                tag_html = ""
+                for t in tags_list:
+                    tag_html += f'<span class="book-tag">{t.strip()}</span>'
+                st.markdown(tag_html, unsafe_allow_html=True)
             
         with col2:
             ai_data = None
@@ -337,31 +372,34 @@ def show_book_details(book, ws_books, ws_authors):
             google_search = f"https://www.google.com/search?q={urllib.parse.quote(book['Titel'] + ' ' + book['Autor'])}"
             st.markdown(f"[🔍 Google]({google_search}) | [📖 Wiki]({wiki_book})")
 
-    # --- TAB 2: BEARBEITEN / LÖSCHEN ---
     with d_tab2:
-        st.write("Hier kannst du Tippfehler korrigieren oder das Buch löschen.")
+        st.write("Daten bearbeiten oder Tags manuell ergänzen.")
         with st.form("edit_book_form"):
             new_title = st.text_input("Titel", value=book["Titel"])
             new_author = st.text_input("Autor", value=book["Autor"])
+            # Editierbare Tags
+            current_tags = book.get("Tags", "")
+            new_tags = st.text_input("Tags (z.B. #Fantasy, #Epos)", value=current_tags)
             
             if st.form_submit_button("💾 Änderungen speichern"):
-                # Update Logic
                 try:
-                    cell = ws_books.find(book["Titel"]) # Suche nach altem Titel
-                    # Spaltenindizes finden (Achtung: gspread ist 1-indexed)
+                    cell = ws_books.find(book["Titel"])
                     headers = [str(h).lower() for h in ws_books.row_values(1)]
                     col_t = headers.index("titel") + 1
                     col_a = headers.index("autor") + 1
+                    # Tags Spalte finden oder Fehler vermeiden
+                    try: col_tags = headers.index("tags") + 1
+                    except: col_tags = len(headers) + 1 # Fallback
                     
                     ws_books.update_cell(cell.row, col_t, new_title)
                     ws_books.update_cell(cell.row, col_a, new_author)
+                    ws_books.update_cell(cell.row, col_tags, new_tags)
                     
                     cleanup_author_duplicates_batch(ws_books, ws_authors)
                     del st.session_state.df_books
                     st.success("Gespeichert!")
-                    time.sleep(1)
-                    st.rerun()
-                except: st.error("Fehler beim Speichern (Titel nicht gefunden?)")
+                    time.sleep(1); st.rerun()
+                except: st.error("Fehler beim Speichern")
 
         st.markdown("---")
         st.markdown("**Gefahrenzone**")
@@ -369,8 +407,7 @@ def show_book_details(book, ws_books, ws_authors):
             if delete_book(ws_books, book["Titel"]):
                 del st.session_state.df_books
                 st.success("Gelöscht!")
-                time.sleep(1)
-                st.rerun()
+                time.sleep(1); st.rerun()
             else: st.error("Fehler beim Löschen.")
 
 # --- MAIN ---
@@ -409,10 +446,13 @@ def main():
                     val = (rate + 1) if rate is not None else 0
                     t, a = [x.strip() for x in inp.split(",", 1)]
                     fa = smart_author(a, authors)
-                    c, g = fetch_meta(t, fa)
-                    ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen"])
-                    cleanup_author_duplicates_batch(ws_books, ws_authors)
-                    del st.session_state.df_books
+                    with st.spinner("Lade Metadaten & generiere Tags..."):
+                        c, g = fetch_meta(t, fa)
+                        # KI TAGGING HIER:
+                        tags = get_ai_tags(t, fa)
+                        ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", tags])
+                        cleanup_author_duplicates_batch(ws_books, ws_authors)
+                        del st.session_state.df_books
                     st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
@@ -420,53 +460,28 @@ def main():
     with tab_sammlung:
         view = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed")
         df_s = df[df["Status"] == "Gelesen"].copy()
-        
         q = st.text_input("Suche...", label_visibility="collapsed")
         if q: df_s = df_s[df_s["Titel"].str.lower().str.contains(q.lower())]
         
-        # --- LISTEN ANSICHT (Echte Liste!) ---
         if view == "Liste":
-            # Wir bauen einen Data Editor, fügen aber eine Spalte für "Info" hinzu
-            # Da data_editor keine Buttons kann, nutzen wir einen Trick:
-            # Eine Boolean Spalte "Info", wenn man die anklickt, geht das Fenster auf.
-            
             df_list = df_s[["Titel", "Autor", "Bewertung", "Notiz"]].copy()
-            df_list.insert(0, "ℹ️", False) # Checkbox Spalte ganz links
-            
+            df_list.insert(0, "ℹ️", False)
             edited_df = st.data_editor(
                 df_list,
                 column_config={
-                    "ℹ️": st.column_config.CheckboxColumn("Info", help="Anklicken für Details", width="small"),
-                    "Titel": st.column_config.TextColumn("Titel", disabled=True), # Titel editieren lieber im Detail-Fenster um IDs nicht zu brechen
-                    "Autor": st.column_config.TextColumn("Autor", disabled=True),
+                    "ℹ️": st.column_config.CheckboxColumn("Info", width="small"),
+                    "Titel": st.column_config.TextColumn(disabled=True),
+                    "Autor": st.column_config.TextColumn(disabled=True),
                     "Bewertung": st.column_config.NumberColumn("⭐", min_value=0, max_value=5, step=1),
-                    "Notiz": st.column_config.TextColumn("Notiz", width="large")
-                },
-                hide_index=True,
-                use_container_width=True,
-                key="editor_list"
+                    "Notiz": st.column_config.TextColumn(width="large")
+                }, hide_index=True, use_container_width=True, key="editor_list"
             )
-            
-            # Prüfen ob jemand "Info" geklickt hat
-            # Wir suchen die Zeile, wo "ℹ️" True ist
             if edited_df["ℹ️"].any():
-                # Finde das Buch
-                selected_row_idx = edited_df[edited_df["ℹ️"]].index[0]
-                # Hole die echten Daten aus dem originalen df_s (weil index gleich bleibt)
-                original_book_data = df_s.loc[selected_row_idx]
-                show_book_details(original_book_data, ws_books, ws_authors)
-                # Nach dem Schließen könnte man einen Rerun erzwingen, um die Checkbox zu leeren, 
-                # aber st.dialog macht das meist automatisch beim Schließen.
-
-            # Änderungen speichern (Bewertung/Notiz aus Liste)
-            # Diff checken ist hier komplex, wir bieten lieber einen "Save Changes" Button an, wenn man in der Liste editiert
+                sel_idx = edited_df[edited_df["ℹ️"]].index[0]
+                show_book_details(df_s.loc[sel_idx], ws_books, ws_authors)
             if st.button("💾 Änderungen in Liste speichern"):
                 if update_full_dataframe(ws_books, edited_df):
-                    st.success("Liste aktualisiert!")
-                    del st.session_state.df_books
-                    time.sleep(1); st.rerun()
-
-        # --- KACHEL ANSICHT ---
+                    st.success("Aktualisiert!"); del st.session_state.df_books; time.sleep(1); st.rerun()
         else:
             cols = st.columns(3)
             for i, (idx, row) in enumerate(df_s.iterrows()):
@@ -478,28 +493,23 @@ def main():
                             if st.button("ℹ️ Info", key=f"k_{idx}"): show_book_details(row, ws_books, ws_authors)
                         with c2:
                             st.write(f"**{row['Titel']}**")
-                            st.caption(row["Autor"])
+                            # Zeige Tags auch in der Kachel (klein)
+                            if "Tags" in row and row["Tags"]:
+                                first_tag = row["Tags"].split(",")[0]
+                                st.caption(f"{row['Autor']} • {first_tag}")
+                            else:
+                                st.caption(row["Autor"])
                             
-                            # Bewertung sicher anzeigen
                             try: star_val = int(row['Bewertung'])
                             except: star_val = 0
-                            
-                            # Feedback Widget für Kachel-Edit
                             new_stars = st.feedback("stars", key=f"fb_{idx}")
-                            
-                            # Logik: Wenn Feedback genutzt wurde, speichern
-                            # Achtung: Feedback ist 0-indexed (0 Sterne = 0, 1 Stern = 0 im Index? Nein, 1 Stern = 0)
-                            # Wir prüfen Session State
                             if f"fb_{idx}" in st.session_state and st.session_state[f"fb_{idx}"] is not None:
                                 user_val = st.session_state[f"fb_{idx}"] + 1
                                 if user_val != star_val:
                                     update_single_entry(ws_books, row["Titel"], "Bewertung", user_val)
                                     st.toast("Bewertung gespeichert!"); del st.session_state.df_books; time.sleep(0.2); st.rerun()
-                            # Fallback Anzeige wenn nix geklickt
-                            elif star_val > 0:
-                                st.markdown(f"<div style='color:#d35400'>{'★'*star_val}</div>", unsafe_allow_html=True)
+                            elif star_val > 0: st.markdown(f"<div style='color:#d35400'>{'★'*star_val}</div>", unsafe_allow_html=True)
 
-                            # Notiz
                             old_n = row["Notiz"]
                             new_n = st.text_area("Notiz", old_n, key=f"n_{idx}", height=70, label_visibility="collapsed")
                             if new_n != old_n:
@@ -517,7 +527,9 @@ def main():
                     if "," in iw:
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         c, g = fetch_meta(t, a)
-                        ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste"])
+                        # KI TAGGING HIER:
+                        tags = get_ai_tags(t, a)
+                        ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", tags])
                         del st.session_state.df_books; st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
         
         df_w = df[df["Status"] == "Wunschliste"].copy()
@@ -539,14 +551,14 @@ def main():
                                     del st.session_state.df_books; st.rerun()
                             with c2:
                                 st.write(f"**{row['Titel']}**")
-                                st.caption(row["Autor"])
+                                if "Tags" in row and row["Tags"]: st.caption(f"{row['Autor']} • {row['Tags'].split(',')[0]}")
+                                else: st.caption(row["Autor"])
                                 old_n = row["Notiz"]
                                 new_n = st.text_area("Notiz", old_n, key=f"wn_{idx}", height=70, label_visibility="collapsed")
                                 if new_n != old_n:
                                     update_single_entry(ws_books, row["Titel"], "Notiz", new_n)
                                     st.toast("Gespeichert!"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
             else:
-                # LISTE WUNSCHLISTE
                 df_w_list = df_w[["Titel", "Autor", "Notiz"]].copy()
                 df_w_list.insert(0, "ℹ️", False)
                 edited_w = st.data_editor(
@@ -557,7 +569,6 @@ def main():
                 if edited_w["ℹ️"].any():
                     sel_idx = edited_w[edited_w["ℹ️"]].index[0]
                     show_book_details(df_w.loc[sel_idx], ws_books, ws_authors)
-                
         else: st.info("Leer.")
 
     # --- STATISTIK ---
@@ -569,7 +580,19 @@ def main():
         if not df_r.empty:
             top = df_r["Autor"].mode()[0]
             c2.metric("Top Autor", top)
-            st.dataframe(df_r["Autor"].value_counts().reset_index(), use_container_width=True, hide_index=True)
+            st.markdown("---")
+            st.subheader("Lieblings-Themen (Tags)")
+            # Tag Cloud Logik
+            all_tags = []
+            if "Tags" in df_r.columns:
+                for t in df_r["Tags"].dropna():
+                    all_tags.extend([x.strip() for x in t.split(",") if x.strip()])
+                if all_tags:
+                    tag_counts = pd.Series(all_tags).value_counts().reset_index()
+                    tag_counts.columns = ["Thema", "Anzahl"]
+                    st.dataframe(tag_counts, use_container_width=True, hide_index=True)
+                else: st.info("Noch keine Tags generiert.")
+            else: st.info("Noch keine Tags vorhanden.")
 
 if __name__ == "__main__":
     main()
