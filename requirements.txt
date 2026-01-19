@@ -3,6 +3,5 @@ pandas
 gspread
 google-auth
 requests
-
 deep-translator
-google-generativeai
+google-generativeai>=0.7.0
