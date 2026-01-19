@@ -228,29 +228,37 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# HILFSFUNKTION: ROBUSTER KI AUFRUF
-def call_gemini_safe(model, prompt):
-    try:
-        return model.generate_content(prompt)
-    except Exception as e:
-        # Fängt Quote Exceeded Fehler ab
-        if "429" in str(e): return None
-        return None
+# --- DAS IST DER NEUE SUPER-SICHERE KI-AUFRUF ---
+def query_gemini_fallback(prompt):
+    """Versucht stur Modelle durch, bis eines klappt."""
+    if "gemini_api_key" not in st.secrets: return None, "Kein API Key"
+    genai.configure(api_key=st.secrets["gemini_api_key"])
+    
+    # LISTE DER ERLAUBTEN MODELLE (KEIN 2.5 DABEI!)
+    safe_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-pro",
+        "gemini-1.0-pro"
+    ]
+    
+    last_error = ""
+    for model_name in safe_models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            # Erfolgreich? Text putzen und raus damit!
+            return response.text.replace("```json", "").replace("```", "").strip(), None
+        except Exception as e:
+            last_error = str(e)
+            # Wenn Fehler 429 (Limit) -> Nächstes Modell probieren
+            # Wenn Fehler 404 (Modell nicht da) -> Nächstes Modell probieren
+            continue
+            
+    return None, f"Alle Modelle belegt/fehlerhaft. Letzter Fehler: {last_error}"
 
 @st.cache_data(show_spinner=False)
 def get_ai_tags_and_year(titel, autor):
-    if "gemini_api_key" not in st.secrets: return {"tags": "", "year": ""}
-    
-    genai.configure(api_key=st.secrets["gemini_api_key"])
-    
-    # KORREKTUR: Wir nutzen HARTCODIERT das 1.5-Flash Modell
-    # KEINE automatische Suche mehr, da diese das limitierte 2.5 Modell findet.
-    try:
-        model = genai.GenerativeModel("models/gemini-1.5-flash")
-    except:
-        # Fallback auf Pro, falls Flash klemmt
-        model = genai.GenerativeModel("models/gemini-1.5-pro")
-
     prompt = f"""
     Buch: "{titel}" von {autor}.
     Aufgabe: 
@@ -259,16 +267,11 @@ def get_ai_tags_and_year(titel, autor):
     Antworte NUR als JSON: {{ "tags": "#Tag1, #Tag2", "year": "YYYY" }}
     """
     
-    response = call_gemini_safe(model, prompt)
+    raw_text, error = query_gemini_fallback(prompt)
+    if not raw_text: return {"tags": "", "year": ""}
     
-    if response is None:
-        return None 
-        
-    try:
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except:
-        return {"tags": "", "year": ""}
+    try: return json.loads(raw_text)
+    except: return {"tags": "", "year": ""}
 
 def batch_enrich_books(ws, df):
     headers = [str(h).lower() for h in ws.row_values(1)]
@@ -286,64 +289,50 @@ def batch_enrich_books(ws, df):
     
     count = 0
     total = len(df_missing)
-    limit_reached = False
     
     for i, row in df_missing.iterrows():
         status_text.text(f"Analysiere ({count+1}/{total}): {row['Titel']}...")
         
         ai_res = get_ai_tags_and_year(row["Titel"], row["Autor"])
         
-        if ai_res is None:
-            limit_reached = True
-            break 
-        
+        # Leere Ergebnisse ignorieren
+        if not ai_res.get("tags") and not ai_res.get("year"):
+            # Wenn die KI nichts liefert (wegen Fehler), machen wir weiter
+            time.sleep(1)
+            continue
+
         try:
             cell = ws.find(row["Titel"])
             current_tags = row["Tags"]
             current_year = row["Erschienen"]
-            
             if not current_tags and ai_res.get("tags"): ws.update_cell(cell.row, col_tag_idx, ai_res["tags"])
             if not current_year and ai_res.get("year"): ws.update_cell(cell.row, col_year_idx, ai_res["year"])
             count += 1
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        time.sleep(4.0) # Pause (Sicherheitsabstand)
+        time.sleep(2.0) # Bremse
         
-    progress_bar.empty()
-    
-    if limit_reached:
-        status_text.warning(f"🛑 Limit kurzzeitig erreicht. {count} Bücher geschafft.")
-        time.sleep(5)
-    else:
-        status_text.success("Fertig!")
-        time.sleep(1)
-        
+    status_text.success(f"Fertig! {count} Bücher aktualisiert.")
+    time.sleep(2)
     status_text.empty()
+    progress_bar.empty()
     return count
 
 @st.cache_data(show_spinner=False)
 def get_ai_book_info(titel, autor):
-    if "gemini_api_key" not in st.secrets:
-        return {"teaser": "Fehler: Key fehlt.", "bio": "-"}
-    try:
-        genai.configure(api_key=st.secrets["gemini_api_key"])
-        # AUCH HIER: HARTCODIERT AUF 1.5-FLASH
-        model = genai.GenerativeModel("models/gemini-1.5-flash")
-        
-        prompt = f"""
-        Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
-        Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
-        Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
-        Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
-        """
-        response = call_gemini_safe(model, prompt)
-        if response is None: return {"teaser": "Tageslimit erreicht.", "bio": "-"}
-        
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception as e:
-        return {"teaser": f"Fehler: {str(e)}", "bio": "-"}
+    prompt = f"""
+    Du bist ein literarischer Assistent. Buch: "{titel}" von {autor}.
+    Aufgabe 1: Schreibe einen spannenden Teaser (max 80 Wörter). Keine Spoiler!
+    Aufgabe 2: Schreibe eine sehr kurze Biografie über den Autor (max 40 Wörter).
+    Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
+    """
+    
+    raw_text, error = query_gemini_fallback(prompt)
+    if not raw_text: return {"teaser": f"KI überlastet ({error})", "bio": "-"}
+    
+    try: return json.loads(raw_text)
+    except: return {"teaser": "Fehler beim Lesen der KI-Antwort", "bio": "-"}
 
 def smart_author(short, known):
     s = short.strip().lower()
@@ -401,7 +390,6 @@ def show_book_details(book, ws_books, ws_authors):
     with d_tab1:
         st.markdown(f"### {book['Titel']}")
         
-        # SICHERE ABFRAGE DES JAHRES
         year_val = book.get('Erschienen')
         year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
         st.markdown(f"**von {book['Autor']}{year_str}**")
@@ -500,7 +488,7 @@ def main():
     if "df_books" not in st.session_state: 
         with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
     
-    # --- HOTFIX: MIGRATION CHECK ---
+    # --- MIGRATION CHECK ---
     if "df_books" in st.session_state:
         if "Erschienen" not in st.session_state.df_books.columns:
             st.session_state.df_books = get_data(ws_books)
@@ -520,7 +508,6 @@ def main():
         if st.button("✨ Daten anreichern (Tags & Jahr)"):
             count = batch_enrich_books(ws_books, df)
             if count > 0:
-                st.success(f"{count} Bücher aktualisiert!")
                 del st.session_state.df_books
                 time.sleep(2); st.rerun()
             else: st.info("Alles aktuell.")
@@ -625,8 +612,8 @@ def main():
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         c, g, y = fetch_meta(t, a)
                         ai_res = get_ai_tags_and_year(t, a)
-                        tags = ai_res["tags"]
-                        if not y: y = ai_res["year"]
+                        tags = ai_res["tags"] if ai_res else ""
+                        if not y and ai_res: y = ai_res["year"]
                         ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", tags, y])
                         del st.session_state.df_books; st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
         
