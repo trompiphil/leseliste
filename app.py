@@ -243,18 +243,13 @@ def get_ai_tags_and_year(titel, autor):
     
     genai.configure(api_key=st.secrets["gemini_api_key"])
     
-    # WIR NEHMEN JETZT HARTCODIERT DAS STABILE MODELL
-    # Um zu verhindern, dass er "2.5" oder andere experimentelle nimmt
-    model_name = "models/gemini-1.5-flash"
-    
-    # Fallback Suche, falls der harte Name fehlschlägt
+    # KORREKTUR: Wir nutzen HARTCODIERT das 1.5-Flash Modell
+    # KEINE automatische Suche mehr, da diese das limitierte 2.5 Modell findet.
     try:
-        model = genai.GenerativeModel(model_name)
+        model = genai.GenerativeModel("models/gemini-1.5-flash")
     except:
-        all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # Suche nach Flash, aber vermeide 2.5 falls möglich, sonst nimm Pro
-        selected = next((m for m in all_models if "flash" in m and "1.5" in m), all_models[0] if all_models else None)
-        model = genai.GenerativeModel(selected)
+        # Fallback auf Pro, falls Flash klemmt
+        model = genai.GenerativeModel("models/gemini-1.5-pro")
 
     prompt = f"""
     Buch: "{titel}" von {autor}.
@@ -267,7 +262,7 @@ def get_ai_tags_and_year(titel, autor):
     response = call_gemini_safe(model, prompt)
     
     if response is None:
-        return None # Signalisiert "Limit erreicht"
+        return None 
         
     try:
         text = response.text.replace("```json", "").replace("```", "").strip()
@@ -300,24 +295,25 @@ def batch_enrich_books(ws, df):
         
         if ai_res is None:
             limit_reached = True
-            break # Schleife beenden, Daten sichern, Nutzer warnen
+            break 
         
         try:
             cell = ws.find(row["Titel"])
             current_tags = row["Tags"]
             current_year = row["Erschienen"]
+            
             if not current_tags and ai_res.get("tags"): ws.update_cell(cell.row, col_tag_idx, ai_res["tags"])
             if not current_year and ai_res.get("year"): ws.update_cell(cell.row, col_year_idx, ai_res["year"])
             count += 1
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        time.sleep(2.0) # Pause
+        time.sleep(4.0) # Pause (Sicherheitsabstand)
         
     progress_bar.empty()
     
     if limit_reached:
-        status_text.warning(f"🛑 Tageslimit erreicht! {count} Bücher geschafft. Morgen geht's weiter.")
+        status_text.warning(f"🛑 Limit kurzzeitig erreicht. {count} Bücher geschafft.")
         time.sleep(5)
     else:
         status_text.success("Fertig!")
@@ -332,7 +328,7 @@ def get_ai_book_info(titel, autor):
         return {"teaser": "Fehler: Key fehlt.", "bio": "-"}
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
-        # Auch hier: Hardcoded auf stabil
+        # AUCH HIER: HARTCODIERT AUF 1.5-FLASH
         model = genai.GenerativeModel("models/gemini-1.5-flash")
         
         prompt = f"""
@@ -342,7 +338,7 @@ def get_ai_book_info(titel, autor):
         Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
         """
         response = call_gemini_safe(model, prompt)
-        if response is None: return {"teaser": "Tageslimit erreicht. Bitte morgen probieren.", "bio": "-"}
+        if response is None: return {"teaser": "Tageslimit erreicht.", "bio": "-"}
         
         text = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(text)
@@ -527,7 +523,7 @@ def main():
                 st.success(f"{count} Bücher aktualisiert!")
                 del st.session_state.df_books
                 time.sleep(2); st.rerun()
-            else: pass # Nichts zu tun oder Limit
+            else: st.info("Alles aktuell.")
 
     tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik & Autoren"])
     
@@ -629,8 +625,8 @@ def main():
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         c, g, y = fetch_meta(t, a)
                         ai_res = get_ai_tags_and_year(t, a)
-                        tags = ai_res["tags"] if ai_res else ""
-                        if not y and ai_res: y = ai_res["year"]
+                        tags = ai_res["tags"]
+                        if not y: y = ai_res["year"]
                         ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", tags, y])
                         del st.session_state.df_books; st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
         
