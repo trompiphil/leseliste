@@ -367,7 +367,8 @@ def main():
     # --- NEU ---
     with tab_neu:
         st.header("Buch hinzufügen")
-        with st.form("add"):
+        # HIER IST DIE ÄNDERUNG: clear_on_submit=True
+        with st.form("add", clear_on_submit=True):
             c1, c2 = st.columns([2, 1])
             with c1: inp = st.text_input("Titel, Autor")
             with c2: 
@@ -381,7 +382,13 @@ def main():
                     c, g = fetch_meta(t, fa)
                     ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen"])
                     cleanup_author_duplicates_batch(ws_books, ws_authors)
-                    del st.session_state.df_books; st.rerun()
+                    del st.session_state.df_books
+                    
+                    # HIER SIND DIE BALLONS & DELAY
+                    st.success(f"Gespeichert: {t}")
+                    st.balloons()
+                    time.sleep(1.0)
+                    st.rerun()
                 else: st.error("Format: Titel, Autor")
 
     # --- SAMMLUNG ---
@@ -421,8 +428,9 @@ def main():
     # --- MERKLISTE ---
     with tab_merkliste:
         w_view = st.radio("Wunschliste Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed")
+        # Auch hier clear_on_submit für Konsistenz
         with st.expander("➕ Neuer Wunsch"):
-            with st.form("wish"):
+            with st.form("wish", clear_on_submit=True):
                 iw = st.text_input("Titel, Autor")
                 inote = st.text_input("Notiz")
                 if st.form_submit_button("Hinzufügen"):
@@ -430,7 +438,11 @@ def main():
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         c, g = fetch_meta(t, a)
                         ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste"])
-                        del st.session_state.df_books; st.rerun()
+                        del st.session_state.df_books
+                        st.success(f"Gemerkt: {t}")
+                        st.balloons() # Auch hier Ballons!
+                        time.sleep(1.0)
+                        st.rerun()
         
         df_w = df[df["Status"] == "Wunschliste"].copy()
         if not df_w.empty:
@@ -442,7 +454,6 @@ def main():
                             c1, c2 = st.columns([1, 2])
                             with c1:
                                 st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                                # HIER IST DAS NEUE POPUP FEATURE FÜR DIE MERKLISTE
                                 if st.button("ℹ️ Info", key=f"wk_{idx}"): show_book_details(row)
                                 if st.button("✅ Gelesen", key=f"wr_{idx}"):
                                     cell = ws_books.find(row["Titel"])
@@ -463,7 +474,6 @@ def main():
                     c1, c2, c3, c4 = st.columns([1,3,1,1])
                     c1.image(r["Cover"], width=50)
                     c2.write(f"**{r['Titel']}**\n{r['Autor']}")
-                    # AUCH HIER IN DER LISTE
                     if c3.button("ℹ️ Info", key=f"wl_{i}"): show_book_details(r)
                     if c4.button("✅ Gelesen", key=f"wrl_{i}"):
                         cell = ws_books.find(r["Titel"])
