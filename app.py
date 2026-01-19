@@ -10,7 +10,7 @@ from deep_translator import GoogleTranslator
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide")
 
-# --- CSS DESIGN ---
+# --- CSS DESIGN (MOBILE OPTIMIZED) ---
 st.markdown("""
     <style>
     /* Globaler Reset */
@@ -42,18 +42,37 @@ st.markdown("""
         border-radius: 12px;
         border: 1px solid #d35400;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+        padding: 10px; /* Etwas Padding innen */
     }
 
-    /* Navigation */
-    div[role="radiogroup"] label {
-        background-color: #eaddcf !important;
-        border: 1px solid #d35400;
-        color: #4a3b2a !important;
-        font-weight: bold;
+    /* --- MOBILE FIXES --- */
+    
+    /* Bilder zwingen klein zu bleiben (auch auf Handy) */
+    div[data-testid="stImage"] img {
+        width: 80px !important;
+        max-width: 80px !important;
+        height: auto !important;
+        margin-left: auto;
+        margin-right: auto;
+        display: block;
+        border-radius: 5px;
+        box-shadow: 1px 1px 4px rgba(0,0,0,0.2);
     }
-    div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #d35400 !important;
-        color: white !important;
+    
+    /* Spaltenabstand auf Handy verringern */
+    [data-testid="column"] {
+        padding: 0px !important;
+    }
+    
+    /* Sidebar Styling */
+    section[data-testid="stSidebar"] {
+        background-color: #eaddcf;
+        border-right: 1px solid #d35400;
+    }
+
+    /* Navigation Radio Buttons in Sidebar hübscher machen */
+    .stRadio > div {
+        background-color: transparent !important;
     }
     
     .stFeedback {
@@ -241,7 +260,6 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
         if len(row) > idx_a and len(row) > idx_s:
             status = row[idx_s].strip()
             auth = row[idx_a].strip()
-            # NUR Gelesene Autoren aufnehmen
             if auth and status != "Wunschliste":
                 final_authors.add(auth)
 
@@ -252,9 +270,17 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
 
 # --- MAIN ---
 def main():
+    # --- SIDEBAR (Slide Menu auf Handy) ---
+    with st.sidebar:
+        st.title("Navigation")
+        if st.button("🚨 Cache Reset", help="Klicken, wenn Daten hängen"): 
+            st.session_state.clear(); st.rerun()
+        
+        st.markdown("---")
+        nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"])
+        st.markdown("---")
+        
     st.title("📚 Meine Bibliothek")
-    
-    if st.sidebar.button("🚨 Cache Reset"): st.session_state.clear(); st.rerun()
     
     client = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
@@ -266,11 +292,7 @@ def main():
         with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
     
     df = st.session_state.df_books
-    
-    # Autorenliste für Autocomplete NUR aus Gelesenen Büchern
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
-    
-    nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"], horizontal=True, label_visibility="collapsed")
     
     # --- TAB: NEU (GELESEN) ---
     if nav == "✍️ Neu (Gelesen)":
@@ -305,9 +327,12 @@ def main():
 
     # --- TAB: SAMMLUNG ---
     elif nav == "🔍 Sammlung":
-        col_h, col_v = st.columns([3, 1])
-        with col_h: st.header("Gelesene Bücher")
-        with col_v: view = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed")
+        # Ansicht-Schalter in die Sidebar für Clean Look
+        with st.sidebar:
+            st.markdown("### Ansicht")
+            view = st.radio("Modus", ["Liste", "Kacheln"], label_visibility="collapsed")
+
+        st.header("Gelesene Bücher")
         
         df_show = st.session_state.df_books.copy()
         df_show = df_show[ (df_show["Status"] == "Gelesen") ]
@@ -352,10 +377,13 @@ def main():
 
         # --- KACHELN ---
         else:
+            # 3 Spalten auf Desktop, Streamlit macht auf Mobile automatisch 1 daraus (Stacking)
             cols = st.columns(3) 
             for i, (idx, row) in enumerate(df_show.iterrows()):
                 with cols[i % 3]:
                     with st.container(border=True):
+                        # Auch hier Columns: Auf Desktop nebeneinander, auf Mobile untereinander
+                        # ABER: Unser CSS zwingt das Bild klein zu bleiben!
                         c_img, c_info = st.columns([1, 2])
                         with c_img:
                             cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
@@ -363,29 +391,30 @@ def main():
                             try: stars = int(row["Bewertung"])
                             except: stars = 0
                             
-                            # Bewertung
                             default_idx = stars - 1 if stars > 0 else None
-                            new_rating_idx = st.feedback("stars", key=f"star_widget_{idx}")
-                            
-                            # Logik: Wenn User klickt, wird reloaded. Wir prüfen ob wert in session state
+                            # Widget Key muss einzigartig sein
                             w_key = f"star_widget_{idx}"
+                            
+                            new_rating_idx = st.feedback("stars", key=w_key)
+                            
+                            # Logik für Auto-Save Rating
                             if w_key in st.session_state and st.session_state[w_key] is not None:
                                 user_val = st.session_state[w_key] + 1
                                 if user_val != stars:
                                     update_single_entry(ws_books, row["Titel"], "Bewertung", user_val)
-                                    st.toast(f"Bewertung gespeichert: {user_val} Sterne")
+                                    st.toast(f"Gespeichert: {user_val} Sterne")
                                     del st.session_state.df_books
                                     time.sleep(0.5); st.rerun()
-                            # Fallback Anzeige wenn nix geklickt (Visuell via HTML da Feedback default buggy sein kann bei Reruns)
-                            elif stars > 0:
-                                st.markdown(f"<div style='text-align:center; color:#d35400;'>{'★'*stars}</div>", unsafe_allow_html=True)
+                            elif stars > 0 and new_rating_idx is None:
+                                # Fallback Anzeige für Mobile wenn Widget zickt
+                                pass 
 
                         with c_info:
                             st.subheader(row["Titel"])
                             st.caption(row["Autor"])
                             
                             current_note = row["Notiz"]
-                            new_note = st.text_area("Notiz", value=current_note, key=f"note_area_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz hier tippen...")
+                            new_note = st.text_area("Notiz", value=current_note, key=f"note_area_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz...")
                             
                             if new_note != current_note:
                                 update_single_entry(ws_books, row["Titel"], "Notiz", new_note)
@@ -396,10 +425,12 @@ def main():
 
     # --- TAB: MERKLISTE ---
     elif nav == "🔮 Merkliste":
-        c_h, c_v = st.columns([3, 1])
-        with c_h: st.header("Wunschliste")
-        with c_v: w_view = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed", key="w_view")
+        # Ansicht Schalter auch hier in Sidebar (globaler Switch wäre möglich, aber so flexibler)
+        with st.sidebar:
+            st.markdown("### Wunschliste Ansicht")
+            w_view = st.radio("Modus ", ["Liste", "Kacheln"], label_visibility="collapsed", key="w_view")
 
+        st.header("Wunschliste")
         with st.expander("➕ Neuen Wunsch hinzufügen", expanded=False):
             with st.form("wish_form", clear_on_submit=True):
                 i_w = st.text_input("Titel, Autor")
@@ -416,15 +447,12 @@ def main():
         df_w = st.session_state.df_books[st.session_state.df_books["Status"]=="Wunschliste"].copy()
         
         if not df_w.empty:
-            # --- KACHELN WUNSCHLISTE ---
             if w_view == "Kacheln":
                 cols = st.columns(3)
                 for i, (idx, row) in enumerate(df_w.iterrows()):
                     with cols[i % 3]:
                         with st.container(border=True):
                             c_img, c_info = st.columns([1, 2])
-                            
-                            # LINKS: BILD + BUTTON
                             with c_img:
                                 cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
                                 st.image(cov, use_container_width=True)
@@ -432,26 +460,21 @@ def main():
                                     cell = ws_books.find(row["Titel"])
                                     ws_books.update_cell(cell.row, 8, "Gelesen")
                                     ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
-                                    cleanup_author_duplicates_batch(ws_books, ws_authors) # Autor in Liste aufnehmen
+                                    cleanup_author_duplicates_batch(ws_books, ws_authors)
                                     del st.session_state.df_books; st.rerun()
 
-                            # RECHTS: TEXTFELD (Wie in Sammlung)
                             with c_info:
                                 st.subheader(row["Titel"])
                                 st.caption(row["Autor"])
-                                
                                 current_n = row["Notiz"]
-                                # HIER IST DAS EDITIERBARE FELD FÜR DIE WUNSCHLISTE
-                                new_n = st.text_area("Notiz", value=current_n, key=f"wnote_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz hier tippen...")
-                                
+                                new_n = st.text_area("Notiz", value=current_n, key=f"wnote_{idx}", label_visibility="collapsed", height=80, placeholder="Notiz...")
                                 if new_n != current_n:
                                     update_single_entry(ws_books, row["Titel"], "Notiz", new_n)
                                     st.toast("Notiz gespeichert!")
                                     del st.session_state.df_books
                                     time.sleep(0.5); st.rerun()
-
-            # --- LISTE WUNSCHLISTE ---
             else:
+                # Liste
                 for i, r in df_w.iterrows():
                     with st.container(border=True):
                         c1, c2, c3 = st.columns([1,4,1])
@@ -472,10 +495,7 @@ def main():
     elif nav == "👥 Autoren":
         st.header("Autoren Statistik")
         df = st.session_state.df_books
-        
-        # FILTER: Nur gelesene Bücher zählen!
         df_read = df[df["Status"] != "Wunschliste"]
-        
         if not df_read.empty:
             auth_counts = df_read["Autor"].value_counts().reset_index()
             auth_counts.columns = ["Autor", "Anzahl Bücher"]
