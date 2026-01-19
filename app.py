@@ -11,66 +11,64 @@ from deep_translator import GoogleTranslator
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide")
 
-# --- CSS DESIGN (High Contrast Fix) ---
+# --- CSS DESIGN (Clean & High Contrast) ---
 st.markdown("""
     <style>
-    /* 1. Hintergrund */
-    .stApp { 
-        background-color: #f5f5dc !important; 
-    }
+    /* Globaler Reset für Farben */
+    .stApp { background-color: #f5f5dc !important; }
+    h1, h2, h3, h4, h5, h6, p, div, span, label, li { color: #2c3e50 !important; }
     
-    /* 2. Textfarben GLOBAL erzwingen */
-    .stApp, .stMarkdown, h1, h2, h3, h4, h5, h6, p, div, span, label, th, td, li { 
-        color: #2c3e50 !important; 
-    }
-    
-    /* 3. Eingabefelder */
-    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {
+    /* Eingabefelder */
+    .stTextInput input, .stTextArea textarea {
         background-color: #fffaf0 !important;
         border: 2px solid #d35400 !important;
-        color: #000000 !important; /* Tiefschwarz */
+        color: #000000 !important;
     }
     
-    /* 4. Buttons */
+    /* Buttons */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
-        font-weight: bold !important;
-        font-size: 18px !important;
-        border-radius: 8px;
+        border-radius: 8px; 
         border: none;
+        font-weight: bold;
+    }
+    .stButton button:hover {
+        background-color: #e67e22 !important;
     }
 
-    /* 5. Kacheln Design */
+    /* Kacheln */
     .book-card {
         background-color: #eaddcf;
-        border: 2px solid #d35400;
-        border-radius: 10px;
+        border: 1px solid #d35400;
+        border-radius: 12px;
         padding: 15px;
         text-align: center;
         height: 100%;
-        box-shadow: 3px 3px 8px rgba(0,0,0,0.2);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: transform 0.2s;
     }
+    .book-card:hover { transform: translateY(-3px); }
     .book-card img {
-        max-width: 100px;
-        border-radius: 5px;
-        margin-bottom: 10px;
-        box-shadow: 1px 1px 5px rgba(0,0,0,0.2);
+        max-width: 110px;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
     }
     .book-title {
-        font-weight: 900 !important;
-        font-size: 1.2em !important;
-        margin-bottom: 5px;
-        color: #000000 !important; /* Schwarz erzwingen */
+        font-weight: 800 !important;
+        font-size: 1.1em !important;
+        margin-bottom: 4px;
+        color: #000000 !important;
+        line-height: 1.3;
     }
     .book-author {
-        font-style: italic;
+        font-size: 0.95em;
+        color: #555 !important;
         margin-bottom: 10px;
-        font-size: 1.0em;
-        color: #4a3b2a !important;
     }
 
-    /* 6. Navigation Tabs */
+    /* Navigation */
     div[role="radiogroup"] label {
         background-color: #eaddcf !important;
         border: 1px solid #d35400;
@@ -84,7 +82,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- FUNKTIONEN ---
+# --- BACKEND FUNKTIONEN ---
 
 def get_connection():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -95,7 +93,7 @@ def get_connection():
                 creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             return gspread.authorize(creds)
-        except Exception as e: return None
+        except Exception: return None
     return None
 
 def setup_sheets(client):
@@ -106,329 +104,349 @@ def setup_sheets(client):
     except: ws_authors = sh.add_worksheet(title="Autoren", rows=1000, cols=1); ws_authors.update_cell(1, 1, "Name")
     return ws_books, ws_authors
 
-def check_and_update_structure(ws):
+def check_structure(ws):
     try:
-        current_headers = ws.row_values(1)
-        if not current_headers:
-            ws.update_cell(1, 1, "Titel")
-            current_headers = ["Titel"]
+        head = ws.row_values(1)
+        if not head: ws.update_cell(1,1,"Titel"); head=["Titel"]
         needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status"]
-        next_col = len(current_headers) + 1
-        for h in needed:
-            if not any(ch.lower() == h.lower() for ch in current_headers):
-                ws.update_cell(1, next_col, h)
-                next_col += 1
-                time.sleep(0.5)
+        next_c = len(head)+1
+        for n in needed:
+            if not any(h.lower()==n.lower() for h in head):
+                ws.update_cell(1, next_c, n); next_c+=1; time.sleep(0.5)
     except: pass
 
-def fetch_data_from_sheet(worksheet):
-    expected_cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Name"]
+def get_data(ws):
+    cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status"]
     try:
-        all_values = worksheet.get_all_values()
-        if len(all_values) < 2: 
-            return pd.DataFrame(columns=expected_cols)
+        raw = ws.get_all_values()
+        if len(raw) < 2: return pd.DataFrame(columns=cols)
+        h_map = {str(h).strip().lower(): i for i, h in enumerate(raw[0])}
         
-        headers = [str(h).strip().lower() for h in all_values[0]]
-        col_map = {}
-        for idx, h in enumerate(headers):
-            if "titel" in h: col_map["Titel"] = idx
-            elif "autor" in h: col_map["Autor"] = idx
-            elif h in ["cover", "bild"]: col_map["Cover"] = idx
-            elif h in ["sterne", "bewertung"]: col_map["Bewertung"] = idx
-            elif h in ["genre"]: col_map["Genre"] = idx
-            elif "hinzugefügt" in h: col_map["Hinzugefügt"] = idx
-            elif "notiz" in h: col_map["Notiz"] = idx
-            elif "status" in h: col_map["Status"] = idx
-            elif "name" in h: col_map["Name"] = idx
+        data = []
+        for r in raw[1:]:
+            d = {}
+            for c in cols:
+                idx = h_map.get(c.lower())
+                val = r[idx] if idx is not None and idx < len(r) else ""
+                d[c] = val
+            
+            # Typkonvertierung für sauberes Editieren
+            # Bewertung zu Zahl (oder 0)
+            try: d["Bewertung"] = int(d["Bewertung"]) if d["Bewertung"] else 0
+            except: d["Bewertung"] = 0
+            
+            if not d["Status"]: d["Status"] = "Gelesen"
+            if d["Titel"]: data.append(d)
+            
+        return pd.DataFrame(data)
+    except: return pd.DataFrame(columns=cols)
 
-        rows = []
-        for raw_row in all_values[1:]:
-            entry = {c: "" for c in expected_cols}
-            entry["Status"] = "Gelesen" 
-            
-            for key, idx in col_map.items():
-                if idx < len(raw_row):
-                    entry[key] = raw_row[idx]
-            
-            if not entry["Status"]: entry["Status"] = "Gelesen"
-            if entry["Titel"] or entry["Name"]:
-                rows.append(entry)
+def update_full_dataframe(ws, new_df):
+    """
+    Überschreibt die Tabelle basierend auf dem editierten DataFrame.
+    Sucht Zeilen anhand des Titels (oder Position, hier vereinfacht via Titel-Match für Updates).
+    Für Bulk-Delete und Bulk-Edit.
+    """
+    # Wir lesen erst die aktuelle Sheet-Daten, um die Zeilennummern zu haben
+    current_data = ws.get_all_values()
+    headers = [str(h).lower() for h in current_data[0]]
+    
+    # Mapping Spaltenname -> Index
+    col_idx = {
+        "titel": headers.index("titel"),
+        "autor": headers.index("autor"),
+        "bewertung": headers.index("bewertung"),
+        "notiz": headers.index("notiz"),
+        "status": headers.index("status")
+    } if "titel" in headers else {}
+    
+    if not col_idx: return False
+
+    # Updates sammeln
+    updates = []
+    rows_to_delete = [] # Wir sammeln Titel zum Löschen
+    
+    # new_df hat eine Spalte "Löschen" (bool)
+    
+    for index, row in new_df.iterrows():
+        # Titel dient als ID (Achtung: Titeländerung hier schwierig, wir nehmen an Titel bleibt ID)
+        titel = row["Titel"]
         
-        if not rows: return pd.DataFrame(columns=expected_cols)
-        return pd.DataFrame(rows)
-    except: return pd.DataFrame(columns=expected_cols)
+        if row.get("Löschen", False):
+            # Zum Löschen vormerken
+            try:
+                cell = ws.find(titel)
+                rows_to_delete.append(cell.row)
+            except: pass
+            continue
 
-def force_reload():
-    st.session_state.clear()
-    st.rerun()
+        # Daten Update
+        try:
+            cell = ws.find(titel)
+            # Wir updaten Zelle für Zelle ist zu langsam. Batch Update Row ist besser.
+            # Hier vereinfacht: Wir prüfen Änderungen.
+            
+            # Bewertung update
+            ws.update_cell(cell.row, col_idx["bewertung"]+1, row["Bewertung"])
+            # Notiz update
+            ws.update_cell(cell.row, col_idx["notiz"]+1, row["Notiz"])
+            # Autor update (falls korrigiert)
+            ws.update_cell(cell.row, col_idx["autor"]+1, row["Autor"])
+            
+            time.sleep(0.3) # Rate limit protection
+        except: pass
 
-def sync_authors(ws_books, ws_authors):
-    # Gibt die Anzahl der neuen Autoren zurück
-    if "df_books" not in st.session_state: st.session_state.df_books = fetch_data_from_sheet(ws_books)
-    if "df_authors" not in st.session_state: st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
-    
-    df_b = st.session_state.df_books
-    df_a = st.session_state.df_authors
-    
-    if df_b.empty or "Autor" not in df_b.columns: return 0
-    
-    existing = set()
-    if "Name" in df_a.columns:
-        existing = set([a.strip() for a in df_a["Name"].tolist() if str(a).strip()])
-    
-    book_authors = set([a.strip() for a in df_b["Autor"].tolist() if str(a).strip()])
-    missing = list(book_authors - existing)
-    missing.sort()
-    
-    if missing:
-        ws_authors.append_rows([[name] for name in missing])
-        # WICHTIG: Cache löschen, damit beim Reload alles frisch ist
-        del st.session_state.df_authors
-        return len(missing)
-    return 0
+    # Löschen (Rückwärts, damit Indizes stimmen)
+    rows_to_delete.sort(reverse=True)
+    for r in rows_to_delete:
+        ws.delete_rows(r)
+        time.sleep(0.5)
+        
+    return True
 
-# --- HELPER ---
-def process_genre(raw_genre):
-    if not raw_genre: return "Roman"
+def update_single_entry(ws, titel, field, value):
     try:
-        translator = GoogleTranslator(source='auto', target='de')
-        t = translator.translate(raw_genre)
-        return t if "römisch" not in t.lower() else "Roman"
+        cell = ws.find(titel)
+        headers = [str(h).lower() for h in ws.row_values(1)]
+        col = headers.index(field.lower()) + 1
+        ws.update_cell(cell.row, col, value)
+        return True
+    except: return False
+
+# --- QUELLEN ---
+def process_genre(raw):
+    if not raw: return "Roman"
+    try: 
+        t = GoogleTranslator(source='auto', target='de').translate(raw)
+        return "Roman" if "römisch" in t.lower() else t
     except: return "Roman"
 
-def fetch_book_data_background(titel, autor):
-    cover, genre = "", "Roman"
+def fetch_meta(titel, autor):
+    c, g = "", "Roman"
     try:
-        q = f"{titel} {autor}"
-        url = f"https://www.googleapis.com/books/v1/volumes?q={q}&langRestrict=de&maxResults=1"
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            d = r.json()
-            if "items" in d:
-                info = d["items"][0]["volumeInfo"]
-                cover = info.get("imageLinks", {}).get("thumbnail", "")
-                genre = process_genre(info.get("categories", ["Roman"])[0])
+        r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q={titel} {autor}&maxResults=1").json()
+        info = r["items"][0]["volumeInfo"]
+        c = info.get("imageLinks", {}).get("thumbnail", "")
+        g = process_genre(info.get("categories", ["Roman"])[0])
     except: pass
-    
-    if not cover:
+    if not c:
         try:
-            q = f"{titel} {autor}".replace(" ", "+")
-            r = requests.get(f"https://openlibrary.org/search.json?q={q}&limit=1", headers={"User-Agent":"App/1.0"}, timeout=5)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("numFound",0)>0 and d.get("docs"):
-                    cid = d["docs"][0].get("cover_i")
-                    if cid: cover = f"https://covers.openlibrary.org/b/id/{cid}-M.jpg"
+            r = requests.get(f"https://openlibrary.org/search.json?q={titel} {autor}&limit=1").json()
+            if r["docs"]: c = f"https://covers.openlibrary.org/b/id/{r['docs'][0]['cover_i']}-M.jpg"
         except: pass
-    return cover, genre
+    return c, g
 
-def get_smart_author_name(short_name, all_authors):
-    short = short_name.strip().lower()
-    for full in sorted(all_authors, key=len, reverse=True):
-        if short in str(full).lower(): return full
-    return short_name
+def smart_author(short, known):
+    s = short.strip().lower()
+    for k in sorted(known, key=len, reverse=True):
+        if s in str(k).lower(): return k
+    return short
 
-def cleanup_author_duplicates_batch(ws_books, ws_authors):
-    def deep_clean(text): return unicodedata.normalize('NFKC', str(text)).replace('\u00A0', ' ').strip()
-    books_vals = ws_books.get_all_values()
-    if not books_vals: return 0
-    headers = [str(h).lower() for h in books_vals[0]]
-    idx_a = next((i for i, h in enumerate(headers) if "autor" in h), -1)
-    if idx_a == -1: return 0
-    raws = [deep_clean(row[idx_a]) for row in books_vals[1:] if len(row)>idx_a and row[idx_a]]
-    clean_map = {}
-    for r in raws: clean_map.setdefault(r.strip(), []).append(r)
-    replacements = {}
-    for clean, versions in clean_map.items():
-        if len(set(versions))>1: 
-            for v in versions: replacements[v] = clean
-    keys = sorted(clean_map.keys(), key=len, reverse=True)
-    for i, long in enumerate(keys):
-        for short in keys[i+1:]:
-            if short.lower() in long.lower() and short.lower() != long.lower():
-                for v in clean_map.get(short, []): replacements[v] = clean_map[long][0]
-    if not replacements: return 0
-    new_data = [books_vals[0]]
-    changed = False
-    for row in books_vals[1:]:
-        nr = list(row)
-        if len(nr)>idx_a:
-            orig = deep_clean(nr[idx_a])
-            if orig in replacements:
-                if nr[idx_a] != replacements[orig]: nr[idx_a] = replacements[orig]; changed = True
-            elif nr[idx_a] != orig: nr[idx_a] = orig; changed = True
-        new_data.append(nr)
-    if changed: ws_books.update(new_data)
-    final_authors = sorted(list({r[idx_a].strip() for r in new_data[1:] if len(r)>idx_a and r[idx_a].strip()}))
-    ws_authors.clear(); ws_authors.update_cell(1,1,"Name")
-    if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in final_authors])
-    return 1
-
-# --- HAUPTPROGRAMM ---
+# --- MAIN ---
 def main():
     st.title("📚 Meine Bibliothek")
     
-    if st.sidebar.button("🚨 Cache leeren & Neustart"):
-        st.session_state.clear()
-        st.rerun()
-
-    if "input_key" not in st.session_state: st.session_state.input_key = 0
-
+    if st.sidebar.button("🚨 Cache Reset"): st.session_state.clear(); st.rerun()
+    
+    # Setup
     client = get_connection()
-    if not client: st.error("Verbindung fehlt! (Secrets prüfen)"); st.stop()
+    if not client: st.error("Secrets fehlen!"); st.stop()
     ws_books, ws_authors = setup_sheets(client)
-
-    if "structure_checked" not in st.session_state:
-        check_and_update_structure(ws_books)
-        st.session_state.structure_checked = True
-
-    if "df_books" not in st.session_state:
-        with st.spinner("Lade Bücher..."): st.session_state.df_books = fetch_data_from_sheet(ws_books)
-    if "df_authors" not in st.session_state: st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
-
-    # --- HIER WAR DER FIX NÖTIG ---
-    added_count = sync_authors(ws_books, ws_authors)
-    if added_count > 0:
-        # Wenn Autoren hinzugefügt wurden (z.B. Patrick Rothfuss), müssen wir neu laden!
-        # Sonst stürzt die App ab, weil df_authors gelöscht wurde.
-        st.rerun()
-
-    # Jetzt ist sichergestellt, dass df_authors existiert (frisch geladen oder aus Cache)
-    if "df_authors" not in st.session_state:
-        st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
-
-    known_authors = []
-    if "Name" in st.session_state.df_authors.columns:
-        known_authors = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
-
-    # NAVIGATION
+    
+    if "checked" not in st.session_state: check_structure(ws_books); st.session_state.checked=True
+    
+    # Load Data
+    if "df_books" not in st.session_state: 
+        with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
+    
+    # Autoren Sync (simpel)
+    df = st.session_state.df_books
+    authors = list(set([a for a in df["Autor"] if a]))
+    
+    # Navigation
     nav = st.radio("Menü", ["✍️ Neu (Gelesen)", "🔍 Sammlung", "🔮 Merkliste", "👥 Autoren"], horizontal=True, label_visibility="collapsed")
     
-    # --- TAB 1 ---
+    # ------------------------------------------------------------------
+    # TAB: NEU
+    # ------------------------------------------------------------------
     if nav == "✍️ Neu (Gelesen)":
-        st.header("Buch gelesen & hinzufügen")
-        with st.form("new_read"):
-            inp = st.text_input("Titel, Autor", key=f"k_{st.session_state.input_key}")
-            rating = st.slider("Bewertung", 1, 5, 5)
-            note = st.text_area("Notiz (optional):")
-            if st.form_submit_button("💾 Speichern"):
+        st.header("Buch hinzufügen")
+        with st.container(border=True):
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                inp = st.text_input("Titel, Autor (mit Komma trennen!)")
+                note = st.text_area("Notiz", height=100)
+            with c2:
+                st.write("Bewertung:")
+                # NEU: Klickbare Sterne
+                rating_idx = st.feedback("stars") # Gibt 0-4 zurück
+                rating_val = (rating_idx + 1) if rating_idx is not None else 0
+            
+            if st.button("💾 In Bibliothek speichern"):
                 if "," in inp:
                     tit, aut = [x.strip() for x in inp.split(",", 1)]
-                    final_aut = get_smart_author_name(aut, known_authors)
-                    with st.spinner("Speichere..."):
-                        c, g = fetch_book_data_background(tit, final_aut)
-                        date_str = datetime.now().strftime("%Y-%m-%d")
-                        ws_books.append_row([tit, final_aut, g, rating, c or NO_COVER_MARKER, date_str, note, "Gelesen"])
-                        cleanup_author_duplicates_batch(ws_books, ws_authors)
+                    final_aut = smart_author(aut, authors)
+                    with st.spinner("Suche Cover & Metadaten..."):
+                        cov, gen = fetch_meta(tit, final_aut)
+                        ws_books.append_row([tit, final_aut, gen, rating_val, cov or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen"])
+                        # Autoren Update Logic hier weggelassen für Speed, passiert beim Reload
                         del st.session_state.df_books
-                    st.success(f"Gelesen: {tit}"); st.balloons(); time.sleep(1); st.session_state.input_key += 1; st.rerun()
-                else: st.error("Komma fehlt!")
+                    st.balloons(); time.sleep(1); st.rerun()
+                else: st.error("Bitte 'Titel, Autor' mit Komma eingeben.")
 
-    # --- TAB 2 ---
+    # ------------------------------------------------------------------
+    # TAB: SAMMLUNG (LISTE & KACHELN)
+    # ------------------------------------------------------------------
     elif nav == "🔍 Sammlung":
-        c_head, c_view = st.columns([3, 1])
-        with c_head: st.header("Meine gelesenen Bücher")
-        with c_view: 
-            view_mode = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed")
-
-        df = st.session_state.df_books.copy()
-        df = df[ (df["Status"] == "Gelesen") | (df["Status"] == "") ]
+        col_h, col_v = st.columns([3, 1])
+        with col_h: st.header("Gelesene Bücher")
+        with col_v: view = st.radio("Ansicht", ["Liste", "Kacheln"], horizontal=True, label_visibility="collapsed")
         
-        if not df.empty:
-            if "Hinzugefügt" in df.columns:
-                df["Hinzugefügt"] = pd.to_datetime(df["Hinzugefügt"], errors='coerce')
-                df = df.sort_values(by="Hinzugefügt", ascending=False)
-            
-            search = st.text_input("🔍 Suchen:", placeholder="Titel, Autor, Jahr...")
-            if search:
-                s = search.lower().strip()
-                df = df[df["Titel"].str.lower().str.contains(s) | df["Autor"].str.lower().str.contains(s)]
-            
-            if view_mode == "Liste":
-                st.data_editor(
-                    df,
-                    column_order=["Cover", "Titel", "Autor", "Bewertung", "Hinzugefügt", "Notiz"],
-                    column_config={
-                        "Cover": st.column_config.ImageColumn("Bild", width="small"),
-                        "Hinzugefügt": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-                    },
-                    hide_index=True,
-                    use_container_width=True
-                )
-            else: 
-                cols = st.columns(3)
-                for i, (idx, row) in enumerate(df.iterrows()):
-                    with cols[i % 3]:
-                        with st.container(border=True):
-                            cov = row["Cover"] if row["Cover"] and row["Cover"] != "-" else "https://via.placeholder.com/100x150?text=Buch"
-                            st.markdown(f"""
-                            <div class="book-card">
-                                <img src="{cov}" style="width:80px">
-                                <div class="book-title">{row['Titel']}</div>
-                                <div class="book-author">{row['Autor']}</div>
-                                <div>{'⭐' * int(row['Bewertung'] if row['Bewertung'] else 0)}</div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            with st.expander("📝 Notiz"):
-                                st.write(row.get("Notiz", "-"))
-                                if "Hinzugefügt" in row and pd.notnull(row['Hinzugefügt']):
-                                    st.caption(f"📅 {row['Hinzugefügt'].strftime('%d.%m.%Y')}")
-        else: st.info("Noch keine Bücher gelesen.")
+        # Daten filtern
+        df_show = st.session_state.df_books.copy()
+        df_show = df_show[ (df_show["Status"] == "Gelesen") ]
+        
+        # Suche
+        q = st.text_input("🔍 Filter (Titel, Autor, Notiz...)", label_visibility="collapsed", placeholder="Suchen...")
+        if q:
+            q = q.lower()
+            df_show = df_show[df_show["Titel"].str.lower().str.contains(q) | df_show["Autor"].str.lower().str.contains(q) | df_show["Notiz"].str.lower().str.contains(q)]
 
-    # --- TAB 3 ---
-    elif nav == "🔮 Merkliste":
-        st.header("🔮 Merkliste")
-        with st.expander("➕ Neuer Wunschtitel"):
-            with st.form("new_wish"):
-                inp_w = st.text_input("Titel, Autor")
-                note_w = st.text_area("Notiz / Warum lesen?")
-                if st.form_submit_button("Auf die Liste setzen"):
-                    if "," in inp_w:
-                        tit, aut = [x.strip() for x in inp_w.split(",", 1)]
-                        final_aut = get_smart_author_name(aut, known_authors)
-                        c, g = fetch_book_data_background(tit, final_aut)
-                        date_str = datetime.now().strftime("%Y-%m-%d")
-                        ws_books.append_row([tit, final_aut, g, "", c or NO_COVER_MARKER, date_str, note_w, "Wunschliste"])
+        # Sortierung nach Datum (neu oben)
+        try: df_show["Hinzugefügt"] = pd.to_datetime(df_show["Hinzugefügt"], errors='coerce')
+        except: pass
+        df_show = df_show.sort_values(by="Hinzugefügt", ascending=False)
+
+        # --- LISTEN ANSICHT (BEARBEITBAR) ---
+        if view == "Liste":
+            # Spalten vorbereiten für Editor
+            # Reihenfolge: Titel, Autor, Bewertung, Cover, Notiz, Datum, LÖSCHEN
+            df_editor = df_show[["Titel", "Autor", "Bewertung", "Cover", "Notiz", "Hinzugefügt"]].copy()
+            df_editor["Löschen"] = False # Checkbox Spalte
+            
+            edited_df = st.data_editor(
+                df_editor,
+                column_order=["Titel", "Autor", "Bewertung", "Cover", "Notiz", "Hinzugefügt", "Löschen"],
+                column_config={
+                    "Titel": st.column_config.TextColumn(disabled=True), # Titel als ID lieber nicht ändern
+                    "Autor": st.column_config.TextColumn("Autor"),
+                    "Bewertung": st.column_config.NumberColumn("⭐", min_value=1, max_value=5, step=1, help="1-5"),
+                    "Cover": st.column_config.ImageColumn("Img", width="small"),
+                    "Notiz": st.column_config.TextColumn("Notiz (Editierbar)", width="large"),
+                    "Hinzugefügt": st.column_config.DateColumn("Datum", disabled=True, format="DD.MM.YYYY"),
+                    "Löschen": st.column_config.CheckboxColumn("🗑️", help="Zum Löschen anhaken")
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed"
+            )
+            
+            # Speicher Button
+            if st.button("💾 Änderungen anwenden (Speichern/Löschen)"):
+                # Unterschiede finden oder einfach alles relevante updaten
+                with st.spinner("Synchronisiere mit Google Sheets..."):
+                    # Wir übergeben das editierte DF an die Update Funktion
+                    success = update_full_dataframe(ws_books, edited_df)
+                    if success:
                         del st.session_state.df_books
-                        st.success(f"Gemerkt: {tit}"); st.rerun()
-                    else: st.error("Komma fehlt!")
+                        st.success("Erledigt!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Fehler beim Speichern.")
 
-        df = st.session_state.df_books.copy()
-        if not df.empty and "Status" in df.columns:
-            df_wish = df[df["Status"] == "Wunschliste"]
-            if not df_wish.empty:
-                for idx, row in df_wish.iterrows():
+        # --- KACHEL ANSICHT (BEARBEITBAR via Popover) ---
+        else:
+            cols = st.columns(4) # 4 Spalten für Clean Look auf Wide
+            for i, (idx, row) in enumerate(df_show.iterrows()):
+                with cols[i % 4]:
                     with st.container(border=True):
-                        c1, c2, c3 = st.columns([1, 4, 2])
-                        with c1: 
-                            if row["Cover"] and row["Cover"] != "-": st.image(row["Cover"], width=60)
-                            else: st.write("📚")
-                        with c2:
-                            st.subheader(row["Titel"])
-                            st.write(f"*{row['Autor']}*")
-                            if row.get("Notiz"): st.info(f"📝 {row['Notiz']}")
-                        with c3:
-                            if st.button("✅ Gelesen!", key=f"read_{idx}"):
-                                cell = ws_books.find(row["Titel"])
-                                headers = ws_books.row_values(1)
-                                try:
-                                    status_col_idx = [h.lower() for h in headers].index("status") + 1
-                                    ws_books.update_cell(cell.row, status_col_idx, "Gelesen")
-                                    del st.session_state.df_books
-                                    st.success("Verschoben zu Gelesen!"); st.rerun()
-                                except: st.error("Fehler beim Verschieben.")
-            else: st.info("Merkliste ist leer.")
+                        # Cover Anzeige
+                        cov = row["Cover"] if row["Cover"] != "-" else "https://via.placeholder.com/150x220?text=No+Cover"
+                        st.markdown(f"""
+                            <div style="text-align:center;">
+                                <img src="{cov}" style="max-height:140px; border-radius:5px; margin-bottom:10px;">
+                                <div style="font-weight:bold; height:50px; overflow:hidden; display:flex; align-items:center; justify-content:center;">{row['Titel']}</div>
+                                <div style="color:gray; font-size:0.9em; margin-bottom:5px;">{row['Autor']}</div>
+                                <div style="color:#d35400;">{'★' * int(row['Bewertung'])}<span style="color:#ccc;">{'★' * (5-int(row['Bewertung']))}</span></div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Bearbeiten Popover
+                        with st.popover("✏️ Bearbeiten", use_container_width=True):
+                            st.write(f"**{row['Titel']}** bearbeiten")
+                            
+                            # Formular im Popover
+                            new_note = st.text_area("Notiz", value=row["Notiz"], key=f"note_{idx}")
+                            
+                            # Sterne im Popover
+                            # Feedback widget returns 0-4, wir müssen mappen
+                            curr_stars = int(row["Bewertung"]) - 1 if row["Bewertung"] > 0 else 0
+                            new_stars_idx = st.feedback("stars", key=f"stars_{idx}")
+                            
+                            # Wenn Feedback noch nicht berührt wurde, ist es None -> Default nehmen
+                            if new_stars_idx is None:
+                                final_stars = row["Bewertung"] # Alter Wert
+                            else:
+                                final_stars = new_stars_idx + 1 # Neuer Wert
 
-    # --- TAB 4 ---
+                            if st.button("Speichern", key=f"save_{idx}"):
+                                update_single_entry(ws_books, row["Titel"], "Notiz", new_note)
+                                # Nur updaten wenn Sterne sich geändert haben via Widget (das ist tricky in Streamlit)
+                                # Vereinfachung: Wir schreiben den Wert aus dem Feedback Widget, wenn vorhanden
+                                if new_stars_idx is not None:
+                                    update_single_entry(ws_books, row["Titel"], "Bewertung", final_stars)
+                                
+                                st.toast("Gespeichert!")
+                                del st.session_state.df_books
+                                time.sleep(1)
+                                st.rerun()
+
+    # ------------------------------------------------------------------
+    # TAB: MERKLISTE
+    # ------------------------------------------------------------------
+    elif nav == "🔮 Merkliste":
+        st.header("Wunschliste")
+        with st.expander("➕ Neuen Wunsch hinzufügen", expanded=False):
+            i_w = st.text_input("Titel, Autor")
+            n_w = st.text_area("Notiz")
+            if st.button("Auf Merkliste"):
+                if "," in i_w:
+                    t, a = [x.strip() for x in i_w.split(",",1)]
+                    c, g = fetch_meta(t, a)
+                    ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), n_w, "Wunschliste"])
+                    del st.session_state.df_books; st.rerun()
+        
+        # Merkliste als Tabelle (einfacher)
+        df_w = st.session_state.df_books[st.session_state.df_books["Status"]=="Wunschliste"].copy()
+        if not df_w.empty:
+            for i, r in df_w.iterrows():
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([1,4,1])
+                    if r["Cover"]!="-": c1.image(r["Cover"], width=60)
+                    else: c1.write("📚")
+                    c2.subheader(r["Titel"])
+                    c2.write(f"{r['Autor']} | 📝 {r['Notiz']}")
+                    if c3.button("✅ Gelesen", key=f"w_{i}"):
+                        cell = ws_books.find(r["Titel"])
+                        # Spalte 8 ist Status (A=1... H=8)
+                        ws_books.update_cell(cell.row, 8, "Gelesen")
+                        # Datum auf heute setzen? Spalte 6 (F)
+                        ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
+                        del st.session_state.df_books; st.rerun()
+        else: st.info("Merkliste leer.")
+
+    # ------------------------------------------------------------------
+    # TAB: AUTOREN
+    # ------------------------------------------------------------------
     elif nav == "👥 Autoren":
-        st.header("Autoren Statistik")
-        df_b = st.session_state.df_books
-        df_a = st.session_state.df_authors.copy()
-        if not df_b.empty and "Autor" in df_b.columns:
-            counts = df_b["Autor"].value_counts()
-            if "Name" in df_a.columns:
-                df_a["Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
-                st.dataframe(df_a.sort_values("Bücher", ascending=False), hide_index=True, use_container_width=True)
+        st.header("Autoren")
+        # Einfache Liste
+        df = st.session_state.df_books
+        if not df.empty:
+            auth_counts = df["Autor"].value_counts().reset_index()
+            auth_counts.columns = ["Autor", "Anzahl Bücher"]
+            st.dataframe(auth_counts, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
