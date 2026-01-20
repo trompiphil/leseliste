@@ -24,10 +24,11 @@ st.markdown("""
     [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
     .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
     .book-tag { display: inline-block; background-color: #d35400; color: white !important; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-right: 5px; margin-bottom: 5px; font-weight: bold; }
+    .log-box { font-family: monospace; font-size: 0.8em; background-color: #333; color: #0f0; padding: 10px; border-radius: 5px; max-height: 200px; overflow-y: scroll; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- BACKEND ---
+# --- BACKEND & LOGGING ---
 def get_connection():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     if "gcp_service_account" in st.secrets:
@@ -43,9 +44,23 @@ def setup_sheets(client):
     try: sh = client.open("Bücherliste") 
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
     ws_books = sh.sheet1
+    
+    # Log Sheet wiederherstellen
+    try: ws_logs = sh.worksheet("Logs")
+    except: 
+        ws_logs = sh.add_worksheet(title="Logs", rows=1000, cols=3)
+        ws_logs.append_row(["Zeitstempel", "Typ", "Nachricht"])
+        
     try: ws_authors = sh.worksheet("Autoren")
     except: ws_authors = sh.add_worksheet(title="Autoren", rows=1000, cols=1); ws_authors.update_cell(1, 1, "Name")
-    return ws_books, ws_authors
+    return ws_books, ws_logs, ws_authors
+
+def log_event(ws_logs, message, msg_type="INFO"):
+    """Schreibt Logs in Sheet und Konsole"""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws_logs.append_row([ts, msg_type, str(message)])
+    except: pass # Logging darf App nicht crashen
 
 def check_structure(ws):
     try:
@@ -121,20 +136,15 @@ def process_genre(raw):
 def fetch_meta(titel, autor):
     c, g, y = "", "Roman", ""
     try:
-        # Google Books
         r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q={titel} {autor}&maxResults=1").json()
         info = r["items"][0]["volumeInfo"]
-        # Versuche High Res Bild zu bekommen wenn möglich, sonst thumbnail
-        imgs = info.get("imageLinks", {})
-        c = imgs.get("thumbnail", "")
+        c = info.get("imageLinks", {}).get("thumbnail", "")
         g = process_genre(info.get("categories", ["Roman"])[0])
         pub_date = info.get("publishedDate", "")
         if pub_date: y = pub_date[:4]
     except: pass
-    
     if not c:
         try:
-            # OpenLibrary Fallback
             r = requests.get(f"https://openlibrary.org/search.json?q={titel} {autor}&limit=1").json()
             if r["docs"]: 
                 doc = r["docs"][0]
@@ -158,7 +168,6 @@ def get_available_models(api_key):
         if r.status_code == 200:
             data = r.json()
             models = [m['name'].replace("models/", "") for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-            # Gemma nach oben
             models.sort(key=lambda x: "gemma" not in x)
             return models
         return []
@@ -183,7 +192,7 @@ def call_ai_manual(prompt, model_name):
 
 def fetch_all_ai_data_manual(titel, autor, model_name):
     prompt = f"""
-    Antworte NUR mit validem JSON. Keine Einleitung. Kein Markdown.
+    Antworte NUR mit validem JSON. Keine Einleitung.
     Buch: "{titel}" von {autor}.
     JSON Format:
     {{
@@ -294,7 +303,6 @@ def show_book_details(book, ws_books, ws_authors):
             new_author = st.text_input("Autor", value=book["Autor"])
             new_year = st.text_input("Erscheinungsjahr", value=book.get("Erschienen", ""))
             
-            # --- NEUES FELD: MANUELLES COVER ---
             current_cover = book.get("Cover", "")
             new_cover_url = st.text_input("Cover URL (manuell)", value=current_cover)
             
@@ -308,10 +316,8 @@ def show_book_details(book, ws_books, ws_authors):
                     headers = [str(h).lower() for h in ws_books.row_values(1)]
                     col_t = headers.index("titel") + 1
                     col_a = headers.index("autor") + 1
-                    # Cover Spalte finden
                     try: col_c = headers.index("cover") + 1
-                    except: col_c = 5 # Fallback
-                    
+                    except: col_c = 5
                     try: col_tags = headers.index("tags") + 1
                     except: col_tags = len(headers) + 1 
                     try: col_y = headers.index("erschienen") + 1
@@ -323,7 +329,7 @@ def show_book_details(book, ws_books, ws_authors):
                     
                     ws_books.update_cell(cell.row, col_t, new_title)
                     ws_books.update_cell(cell.row, col_a, new_author)
-                    ws_books.update_cell(cell.row, col_c, new_cover_url) # Save Cover
+                    ws_books.update_cell(cell.row, col_c, new_cover_url)
                     ws_books.update_cell(cell.row, col_tags, new_tags)
                     ws_books.update_cell(cell.row, col_y, new_year)
                     ws_books.update_cell(cell.row, col_teaser, new_teaser)
@@ -332,7 +338,7 @@ def show_book_details(book, ws_books, ws_authors):
                     cleanup_author_duplicates_batch(ws_books, ws_authors)
                     del st.session_state.df_books
                     st.success("Gespeichert!"); time.sleep(1); st.rerun()
-                except: st.error("Fehler")
+                except Exception as e: st.error(f"Fehler: {e}")
         st.markdown("---")
         if st.button("🗑️ Löschen", type="primary"):
             if delete_book(ws_books, book["Titel"]):
@@ -345,7 +351,7 @@ def main():
     
     client = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
-    ws_books, ws_authors = setup_sheets(client)
+    ws_books, ws_logs, ws_authors = setup_sheets(client)
     
     if "checked" not in st.session_state: check_structure(ws_books); st.session_state.checked=True
     if "df_books" not in st.session_state: 
@@ -418,9 +424,11 @@ def main():
                         row = df.loc[idx]
                         status.write(f"Bearbeite: **{row['Titel']}**...")
                         
+                        log_event(ws_logs, f"Start KI Update: {row['Titel']}", "MANUAL_AI")
                         ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
                         
                         if err == "RATE_LIMIT":
+                            log_event(ws_logs, "Rate Limit erreicht.", "WARN")
                             status.write("⏳ Rate Limit! Warte 60s...")
                             time.sleep(60)
                             ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
@@ -432,7 +440,11 @@ def main():
                                 if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
                                 if ai_data.get("teaser"): ws_books.update_cell(cell.row, c_teaser, ai_data["teaser"])
                                 if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data["bio"])
-                            except: pass
+                                log_event(ws_logs, f"KI Daten gespeichert: {row['Titel']}", "SUCCESS")
+                            except Exception as e:
+                                log_event(ws_logs, f"Fehler beim Speichern: {e}", "ERROR")
+                        else:
+                            log_event(ws_logs, f"KI Fehler: {err}", "ERROR")
                         
                         done += 1
                         prog_bar.progress(done / missing_count)
@@ -444,6 +456,16 @@ def main():
                     st.rerun()
         else:
             st.success("Alles aktuell.")
+            
+        with st.expander("📜 System-Log"):
+            try:
+                logs = ws_logs.get_all_values()
+                if len(logs) > 1:
+                    last_logs = logs[-10:]
+                    txt = ""
+                    for l in reversed(last_logs): txt += f"{l[0][11:]} {l[2]}\n"
+                    st.code(txt)
+            except: st.write("Keine Logs")
 
     tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"])
     
@@ -465,6 +487,8 @@ def main():
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
                         del st.session_state.df_books
+                    
+                    # BALLONS SIND ZURÜCK!
                     st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
@@ -495,23 +519,27 @@ def main():
                             
                             # --- BUTTONS ---
                             b1, b2 = st.columns([3, 1])
-                            # INFO BUTTON
                             if b1.button("ℹ️ Info", key=f"k_{idx}", use_container_width=True): show_book_details(row, ws_books, ws_authors)
                             
-                            # REFRESH BUTTON (Neues Cover suchen)
+                            # REFRESH BUTTON FIX
                             if b2.button("🔄", key=f"r_{idx}", help="Cover neu suchen"):
                                 with st.spinner("Suche Cover..."):
                                     c_new, _, _ = fetch_meta(row["Titel"], row["Autor"])
                                     if c_new:
-                                        # Update Sheet
                                         try:
+                                            # Robuste Suche
                                             cell = ws_books.find(row["Titel"])
                                             headers = [str(h).lower() for h in ws_books.row_values(1)]
-                                            c_col = headers.index("cover") + 1
+                                            try: c_col = headers.index("cover") + 1
+                                            except: c_col = 5 # Fallback Position 5
+                                            
                                             ws_books.update_cell(cell.row, c_col, c_new)
+                                            log_event(ws_logs, f"Cover Update: {row['Titel']}", "UPDATE")
                                             del st.session_state.df_books
                                             st.rerun()
-                                        except: st.error("Fehler beim Speichern")
+                                        except Exception as e: 
+                                            st.error(f"Fehler: {e}")
+                                            log_event(ws_logs, f"Cover Fehler: {e}", "ERROR")
                                     else:
                                         st.toast("Kein besseres Cover gefunden.")
                             
