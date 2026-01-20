@@ -121,15 +121,20 @@ def process_genre(raw):
 def fetch_meta(titel, autor):
     c, g, y = "", "Roman", ""
     try:
+        # Google Books
         r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q={titel} {autor}&maxResults=1").json()
         info = r["items"][0]["volumeInfo"]
-        c = info.get("imageLinks", {}).get("thumbnail", "")
+        # Versuche High Res Bild zu bekommen wenn möglich, sonst thumbnail
+        imgs = info.get("imageLinks", {})
+        c = imgs.get("thumbnail", "")
         g = process_genre(info.get("categories", ["Roman"])[0])
         pub_date = info.get("publishedDate", "")
         if pub_date: y = pub_date[:4]
     except: pass
+    
     if not c:
         try:
+            # OpenLibrary Fallback
             r = requests.get(f"https://openlibrary.org/search.json?q={titel} {autor}&limit=1").json()
             if r["docs"]: 
                 doc = r["docs"][0]
@@ -138,28 +143,22 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- AI CORE (MANUAL + GEMMA SUPPORT) ---
+# --- AI CORE ---
 def clean_json_string(text):
     try:
-        # Finde alles zwischen { und }
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: return match.group(0)
         return text
     except: return text
 
 def get_available_models(api_key):
-    """Listet Modelle auf."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         r = requests.get(url)
         if r.status_code == 200:
             data = r.json()
-            models = [
-                m['name'].replace("models/", "") 
-                for m in data.get('models', []) 
-                if 'generateContent' in m.get('supportedGenerationMethods', [])
-            ]
-            # Sortierung: Gemma nach oben, da hohes Limit
+            models = [m['name'].replace("models/", "") for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            # Gemma nach oben
             models.sort(key=lambda x: "gemma" not in x)
             return models
         return []
@@ -183,7 +182,6 @@ def call_ai_manual(prompt, model_name):
     except Exception as e: return None, str(e)
 
 def fetch_all_ai_data_manual(titel, autor, model_name):
-    # Prompt speziell für Gemma etwas strikter formuliert
     prompt = f"""
     Antworte NUR mit validem JSON. Keine Einleitung. Kein Markdown.
     Buch: "{titel}" von {autor}.
@@ -295,15 +293,25 @@ def show_book_details(book, ws_books, ws_authors):
             new_title = st.text_input("Titel", value=book["Titel"])
             new_author = st.text_input("Autor", value=book["Autor"])
             new_year = st.text_input("Erscheinungsjahr", value=book.get("Erschienen", ""))
+            
+            # --- NEUES FELD: MANUELLES COVER ---
+            current_cover = book.get("Cover", "")
+            new_cover_url = st.text_input("Cover URL (manuell)", value=current_cover)
+            
             new_tags = st.text_input("Tags", value=book.get("Tags", ""))
             new_teaser = st.text_area("Teaser", value=book.get("Teaser", ""))
             new_bio = st.text_area("Bio", value=book.get("Bio", ""))
+            
             if st.form_submit_button("💾 Speichern"):
                 try:
                     cell = ws_books.find(book["Titel"])
                     headers = [str(h).lower() for h in ws_books.row_values(1)]
                     col_t = headers.index("titel") + 1
                     col_a = headers.index("autor") + 1
+                    # Cover Spalte finden
+                    try: col_c = headers.index("cover") + 1
+                    except: col_c = 5 # Fallback
+                    
                     try: col_tags = headers.index("tags") + 1
                     except: col_tags = len(headers) + 1 
                     try: col_y = headers.index("erschienen") + 1
@@ -315,6 +323,7 @@ def show_book_details(book, ws_books, ws_authors):
                     
                     ws_books.update_cell(cell.row, col_t, new_title)
                     ws_books.update_cell(cell.row, col_a, new_author)
+                    ws_books.update_cell(cell.row, col_c, new_cover_url) # Save Cover
                     ws_books.update_cell(cell.row, col_tags, new_tags)
                     ws_books.update_cell(cell.row, col_y, new_year)
                     ws_books.update_cell(cell.row, col_teaser, new_teaser)
@@ -358,7 +367,6 @@ def main():
         
         st.markdown("---")
         
-        # --- MODELL AUSWAHL ---
         if "available_models_list" not in st.session_state:
             with st.spinner("Lade Modelle..."):
                 if "gemini_api_key" in st.secrets:
@@ -366,7 +374,6 @@ def main():
                 else: st.session_state.available_models_list = []
         
         models = st.session_state.available_models_list
-        # Wähle automatisch ein Gemma Modell wenn vorhanden
         default_idx = 0
         for i, m in enumerate(models):
             if "gemma" in m: default_idx = i; break
@@ -375,10 +382,10 @@ def main():
         
         if selected_model and "gemma" in selected_model:
             st.success("🚀 Highspeed-Modus (14k Limits)")
-            pause_time = 1.0 # Schnell
+            pause_time = 1.0 
         else:
-            st.warning("🐢 Standard-Modus (Geringes Limit)")
-            pause_time = 8.0 # Langsam
+            st.warning("🐢 Standard-Modus")
+            pause_time = 8.0 
         
         st.markdown("---")
         st.write("🤖 **KI-Update (Manuell)**")
@@ -429,7 +436,7 @@ def main():
                         
                         done += 1
                         prog_bar.progress(done / missing_count)
-                        time.sleep(pause_time) # Dynamische Pause
+                        time.sleep(pause_time) 
                     
                     status.update(label="Fertig!", state="complete", expanded=False)
                     del st.session_state.df_books
@@ -458,7 +465,7 @@ def main():
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
                         del st.session_state.df_books
-                    st.success(f"Gespeichert: {t}"); time.sleep(1.0); st.rerun()
+                    st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
     with tab_sammlung:
@@ -485,7 +492,29 @@ def main():
                         c1, c2 = st.columns([1, 2])
                         with c1:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                            if st.button("ℹ️ Info", key=f"k_{idx}"): show_book_details(row, ws_books, ws_authors)
+                            
+                            # --- BUTTONS ---
+                            b1, b2 = st.columns([3, 1])
+                            # INFO BUTTON
+                            if b1.button("ℹ️ Info", key=f"k_{idx}", use_container_width=True): show_book_details(row, ws_books, ws_authors)
+                            
+                            # REFRESH BUTTON (Neues Cover suchen)
+                            if b2.button("🔄", key=f"r_{idx}", help="Cover neu suchen"):
+                                with st.spinner("Suche Cover..."):
+                                    c_new, _, _ = fetch_meta(row["Titel"], row["Autor"])
+                                    if c_new:
+                                        # Update Sheet
+                                        try:
+                                            cell = ws_books.find(row["Titel"])
+                                            headers = [str(h).lower() for h in ws_books.row_values(1)]
+                                            c_col = headers.index("cover") + 1
+                                            ws_books.update_cell(cell.row, c_col, c_new)
+                                            del st.session_state.df_books
+                                            st.rerun()
+                                        except: st.error("Fehler beim Speichern")
+                                    else:
+                                        st.toast("Kein besseres Cover gefunden.")
+                            
                         with c2:
                             st.write(f"**{row['Titel']}**")
                             st.caption(f"{row['Autor']}")
