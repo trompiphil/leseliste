@@ -13,14 +13,14 @@ import re
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide")
 
-# --- NAVIGATION SAFETY CHECK (Fix für ValueError) ---
-# Definition der Tabs
+# --- STATE INIT ---
+# Wir definieren die Tabs global, damit wir sie überall nutzen können
 NAV_OPTIONS = ["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"]
 
 if "active_tab" not in st.session_state:
-    st.session_state.active_tab = NAV_OPTIONS[1] # Startet bei Sammlung
+    st.session_state.active_tab = NAV_OPTIONS[1]
 
-# Wenn der gespeicherte Tab nicht in der Liste ist (wegen Code-Änderung), Reset auf Default
+# Fallback falls durch Code-Update der State ungültig wurde
 if st.session_state.active_tab not in NAV_OPTIONS:
     st.session_state.active_tab = NAV_OPTIONS[1]
 
@@ -34,9 +34,8 @@ st.markdown("""
     .stButton button:hover { background-color: #e67e22 !important; }
     [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
     .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
-    .book-tag { display: inline-block; background-color: #d35400; color: white !important; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-right: 5px; margin-bottom: 5px; font-weight: bold; }
-    .log-box { font-family: monospace; font-size: 0.8em; background-color: #333; color: #0f0; padding: 10px; border-radius: 5px; max-height: 200px; overflow-y: scroll; }
     
+    /* Radio Button Styling */
     div[role="radiogroup"] { display: flex; flex-direction: row; justify-content: center; gap: 10px; width: 100%; }
     div[role="radiogroup"] label { background-color: #eaddcf; padding: 10px 20px; border-radius: 8px; border: 1px solid #d35400; cursor: pointer; font-weight: bold; color: #4a3b2a !important; }
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
@@ -61,6 +60,7 @@ def setup_sheets(client):
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
     ws_books = sh.sheet1
     
+    # Log Sheet robust erstellen/laden
     try: ws_logs = sh.worksheet("Logs")
     except: 
         ws_logs = sh.add_worksheet(title="Logs", rows=1000, cols=3)
@@ -71,12 +71,13 @@ def setup_sheets(client):
     return ws_books, ws_logs, ws_authors
 
 def log_to_sheet(ws_logs, message, msg_type="INFO"):
-    """Schreibt Log in Sheet - Robust"""
+    """Schreibt Log und meldet Fehler visuell"""
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ws_logs.append_row([ts, msg_type, str(message)])
     except Exception as e:
-        print(f"Log Error: {e}") # Fallback zur Konsole
+        # Hier machen wir den Fehler sichtbar!
+        st.error(f"LOGGING FEHLER (Google Sheets): {e}")
 
 def check_structure(ws):
     try:
@@ -143,60 +144,50 @@ def update_full_dataframe(ws, new_df):
         except: pass
     return True
 
-# --- PRÄZISE COVER SUCHE ---
+# --- API HELPERS (COVER SEARCH - LOCKER) ---
 def process_genre(raw):
     if not raw: return "Roman"
     try: t = GoogleTranslator(source='auto', target='de').translate(raw); return "Roman" if "römisch" in t.lower() else t
     except: return "Roman"
 
-def fetch_cover_candidates_strict(titel, autor, ws_logs=None):
+def fetch_cover_candidates_loose(titel, autor, ws_logs=None):
     """
-    Sucht nach Covern. Strategie: Exakte Übereinstimmung Autor/Titel bei Google Books.
+    Sucht nach Covern. Strategie: Zeig alles was halbwegs passt.
     """
     candidates = [] 
     
-    # 1. Google Books API (STRENG)
+    # 1. Google Books API (Breite Suche)
     try:
-        # Query: Titel im Titel UND Autor im Autor
-        query = f"intitle:{titel} inauthor:{autor}"
-        url = f"https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(query)}&maxResults=5&printType=books"
+        # Einfach Titel und Autor als String, Google rankt das schon
+        query = f"{titel} {autor}"
+        if ws_logs: log_to_sheet(ws_logs, f"Suche bei Google nach: {query}", "DEBUG")
+        
+        url = f"https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(query)}&maxResults=6&printType=books"
         r = requests.get(url).json()
         
         items = r.get("items", [])
         
-        # Wenn leer, versuche etwas lockerer
-        if not items:
-            if ws_logs: log_to_sheet(ws_logs, f"Strenge Suche leer für {titel}. Versuche Fallback.", "INFO")
-            query = f"{titel} {autor}"
-            url = f"https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(query)}&maxResults=5&printType=books"
-            r = requests.get(url).json()
-            items = r.get("items", [])
+        if not items and ws_logs:
+            log_to_sheet(ws_logs, "Google lieferte 0 Treffer", "WARN")
 
         for item in items:
             info = item.get("volumeInfo", {})
-            
-            # Sicherheitscheck: Ist der Autor halbwegs ähnlich?
-            found_authors = [a.lower() for a in info.get("authors", [])]
-            # Wir prüfen ob ein Teil des gesuchten Autors in den gefundenen Autoren vorkommt
-            author_match = any(autor.lower() in fa or fa in autor.lower() for fa in found_authors)
-            
-            # Wenn Fallback-Suche lief, filtern wir streng nach Autor
-            if not author_match and items: 
-                continue # Überspringen wenn Autor gar nicht passt
-
             imgs = info.get("imageLinks", {})
+            
+            # Bild URL holen (größtes zuerst)
             img_url = ""
             if "extraLarge" in imgs: img_url = imgs["extraLarge"]
             elif "large" in imgs: img_url = imgs["large"]
             elif "medium" in imgs: img_url = imgs["medium"]
             elif "thumbnail" in imgs: img_url = imgs["thumbnail"]
+            elif "smallThumbnail" in imgs: img_url = imgs["smallThumbnail"]
             
             if img_url:
                 if img_url.startswith("http://"): img_url = img_url.replace("http://", "https://")
                 if img_url not in candidates: candidates.append(img_url)
                     
     except Exception as e:
-        if ws_logs: log_to_sheet(ws_logs, f"Google Cover Error: {e}", "WARN")
+        if ws_logs: log_to_sheet(ws_logs, f"Google Cover Error: {e}", "ERROR")
 
     # 2. OpenLibrary Fallback
     try:
@@ -211,7 +202,8 @@ def fetch_cover_candidates_strict(titel, autor, ws_logs=None):
     return candidates
 
 def fetch_meta_single(titel, autor):
-    cands = fetch_cover_candidates_strict(titel, autor)
+    # Für das direkte Hinzufügen nehmen wir einfach das erste Bild der lockeren Suche
+    cands = fetch_cover_candidates_loose(titel, autor)
     c = cands[0] if cands else "-"
     return c, "Roman", datetime.now().strftime("%Y") 
 
@@ -317,6 +309,7 @@ def smart_author(short, known):
         if s in str(k).lower(): return k
     return short
 
+# --- DIALOG & UI ---
 @st.dialog("📖 Buch-Details")
 def show_book_details(book, ws_books, ws_authors, ws_logs):
     t1, t2 = st.tabs(["ℹ️ Info", "✏️ Bearbeiten"])
@@ -357,9 +350,10 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
         new_cover_url = st.text_input("Cover URL (manuell)", value=current_cover)
         
         if st.button("🔍 Cover online suchen (Galerie öffnen)"):
-            with st.spinner("Suche Cover..."):
-                log_to_sheet(ws_logs, f"Manuelle Suche für: {book['Titel']}", "SEARCH")
-                cands = fetch_cover_candidates_strict(book["Titel"], book["Autor"], ws_logs)
+            with st.spinner("Suche passende Bilder..."):
+                log_to_sheet(ws_logs, f"Suche Cover für: {book['Titel']}", "SEARCH")
+                # Nutze die LOCKERE Suche (mehr Ergebnisse)
+                cands = fetch_cover_candidates_loose(book["Titel"], book["Autor"], ws_logs)
                 if cands:
                     st.session_state.cover_candidates = cands
                     log_to_sheet(ws_logs, f"Gefunden: {len(cands)} Bilder", "SUCCESS")
@@ -392,10 +386,8 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 col_t = headers.index("titel") + 1
                 col_a = headers.index("autor") + 1
                 
-                # Robuste Spaltensuche (ignoriert Groß/Klein)
                 try: col_c = headers.index("cover") + 1
                 except: col_c = 5
-                
                 try: col_tags = headers.index("tags") + 1
                 except: col_tags = len(headers) + 1 
                 try: col_y = headers.index("erschienen") + 1
@@ -421,7 +413,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 log_to_sheet(ws_logs, f"Buch gespeichert: {new_title}", "SAVE")
                 st.success("Gespeichert!"); st.balloons(); time.sleep(1); st.rerun()
             except Exception as e:
-                st.error(f"Fehler: {e}")
+                st.error(f"Fehler beim Speichern: {e}")
                 log_to_sheet(ws_logs, f"Save Error: {e}", "ERROR")
 
         st.markdown("---")
@@ -455,6 +447,11 @@ def main():
         st.write("🔧 **Einstellungen**")
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
+        
+        # TEST BUTTON FÜR LOGS
+        if st.button("🛠️ Verbindung testen"):
+            log_to_sheet(ws_logs, "Test Log Eintrag", "TEST")
+            st.success("Test-Log gesendet! Prüfe dein Sheet.")
         
         st.markdown("---")
         
@@ -592,7 +589,7 @@ def main():
                         if b1.button("ℹ️ Info", key=f"k_{idx}", use_container_width=True): 
                             show_book_details(row, ws_books, ws_authors, ws_logs)
                         
-                        # REFRESH BUTTON (Schnell-Suche)
+                        # REFRESH BUTTON (Schnell-Suche mit LOCKERER Strategie)
                         if b2.button("🔄", key=f"r_{idx}", help="Cover neu suchen"):
                             with st.spinner("Suche Cover..."):
                                 c_new, _, _ = fetch_meta_single(row["Titel"], row["Autor"])
@@ -600,7 +597,6 @@ def main():
                                     try:
                                         cell = ws_books.find(row["Titel"])
                                         headers = [str(h).lower() for h in ws_books.row_values(1)]
-                                        # Robuste Suche für Cover-Spalte
                                         try: c_col = headers.index("cover") + 1
                                         except: c_col = 5
                                         
