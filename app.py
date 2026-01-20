@@ -138,36 +138,34 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- AI & MODELL SUCHE ---
+# --- AI CORE (MANUAL + GEMMA SUPPORT) ---
 def clean_json_string(text):
     try:
+        # Finde alles zwischen { und }
         match = re.search(r'\{.*\}', text, re.DOTALL)
         if match: return match.group(0)
         return text
     except: return text
 
-def find_best_model(api_key):
-    """Findet das beste Modell (vermeidet 2.5 wenn möglich, priorisiert 2.0-exp)"""
+def get_available_models(api_key):
+    """Listet Modelle auf."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         r = requests.get(url)
         if r.status_code == 200:
             data = r.json()
-            valid = []
-            for m in data.get('models', []):
-                if 'generateContent' in m.get('supportedGenerationMethods', []):
-                    valid.append(m['name'].split('/')[-1])
-            
-            # Prio Liste
-            prio = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"]
-            for p in prio:
-                if p in valid: return p
-            
-            if valid: return valid[0]
-        return None
-    except: return None
+            models = [
+                m['name'].replace("models/", "") 
+                for m in data.get('models', []) 
+                if 'generateContent' in m.get('supportedGenerationMethods', [])
+            ]
+            # Sortierung: Gemma nach oben, da hohes Limit
+            models.sort(key=lambda x: "gemma" not in x)
+            return models
+        return []
+    except: return []
 
-def call_gemini_manual(prompt, model_name):
+def call_ai_manual(prompt, model_name):
     api_key = st.secrets["gemini_api_key"]
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
@@ -185,12 +183,19 @@ def call_gemini_manual(prompt, model_name):
     except Exception as e: return None, str(e)
 
 def fetch_all_ai_data_manual(titel, autor, model_name):
+    # Prompt speziell für Gemma etwas strikter formuliert
     prompt = f"""
+    Antworte NUR mit validem JSON. Keine Einleitung. Kein Markdown.
     Buch: "{titel}" von {autor}.
-    Erstelle ein JSON mit genau diesen Keys: "tags", "year", "teaser" (max 60 Worte), "bio" (max 30 Worte).
-    Antworte NUR mit dem JSON String.
+    JSON Format:
+    {{
+      "tags": "3-5 kurze Tags auf Deutsch",
+      "year": "Erscheinungsjahr (Zahl)",
+      "teaser": "Spannender Teaser auf Deutsch (max 60 Worte)",
+      "bio": "Kurze Autor Bio auf Deutsch (max 30 Worte)"
+    }}
     """
-    txt, err = call_gemini_manual(prompt, model_name)
+    txt, err = call_ai_manual(prompt, model_name)
     if err: return None, err
     try: return json.loads(txt), None
     except: return None, "JSON Fehler"
@@ -237,7 +242,6 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in sorted(list(final_authors))])
     return 1
 
-# --- DIALOG & HELPERS (MUST BE DEFINED BEFORE MAIN) ---
 def smart_author(short, known):
     s = short.strip().lower()
     for k in sorted(known, key=len, reverse=True):
@@ -266,7 +270,6 @@ def show_book_details(book, ws_books, ws_authors):
                     tag_html += f'<span class="book-tag">{t.strip()}</span>'
                 st.markdown(tag_html, unsafe_allow_html=True)
         with col2:
-            # NUR LESEN
             teaser = book.get("Teaser", "")
             bio = book.get("Bio", "")
             if not teaser or len(str(teaser)) < 5: teaser_disp = "<i>(Keine Info. Bitte 'Fehlende Infos laden' nutzen)</i>"
@@ -354,9 +357,32 @@ def main():
             st.session_state.clear(); st.rerun()
         
         st.markdown("---")
+        
+        # --- MODELL AUSWAHL ---
+        if "available_models_list" not in st.session_state:
+            with st.spinner("Lade Modelle..."):
+                if "gemini_api_key" in st.secrets:
+                    st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
+                else: st.session_state.available_models_list = []
+        
+        models = st.session_state.available_models_list
+        # Wähle automatisch ein Gemma Modell wenn vorhanden
+        default_idx = 0
+        for i, m in enumerate(models):
+            if "gemma" in m: default_idx = i; break
+            
+        selected_model = st.selectbox("🧠 KI-Modell wählen", models, index=default_idx if models else None)
+        
+        if selected_model and "gemma" in selected_model:
+            st.success("🚀 Highspeed-Modus (14k Limits)")
+            pause_time = 1.0 # Schnell
+        else:
+            st.warning("🐢 Standard-Modus (Geringes Limit)")
+            pause_time = 8.0 # Langsam
+        
+        st.markdown("---")
         st.write("🤖 **KI-Update (Manuell)**")
         
-        # Finde Lücken
         missing_count = 0
         missing_indices = []
         if not df.empty:
@@ -366,61 +392,51 @@ def main():
                     missing_indices.append(i)
         
         if missing_count > 0:
-            st.info(f"{missing_count} Bücher ohne volle Infos.")
+            st.info(f"{missing_count} Bücher offen.")
             if st.button("✨ Fehlende Infos laden"):
-                # DER MANUELLE PROZESS
-                api_key = st.secrets.get("gemini_api_key")
-                if not api_key: st.error("Kein API Key"); st.stop()
+                if not selected_model: st.error("Kein Modell!"); st.stop()
                 
-                with st.status("Verbinde mit KI...", expanded=True) as status:
-                    model_name = find_best_model(api_key)
-                    if not model_name:
-                        status.update(label="Fehler: Kein Modell gefunden", state="error")
-                    else:
-                        status.write(f"Modell: {model_name}")
-                        prog_bar = status.progress(0)
+                with st.status(f"Starte mit {selected_model}...", expanded=True) as status:
+                    prog_bar = status.progress(0)
+                    headers = [str(h).lower() for h in ws_books.row_values(1)]
+                    try:
+                        c_tag = headers.index("tags") + 1
+                        c_year = headers.index("erschienen") + 1
+                        c_teaser = headers.index("teaser") + 1
+                        c_bio = headers.index("bio") + 1
+                    except: st.error("Spaltenfehler"); st.stop()
+                    
+                    done = 0
+                    for idx in missing_indices:
+                        row = df.loc[idx]
+                        status.write(f"Bearbeite: **{row['Titel']}**...")
                         
-                        headers = [str(h).lower() for h in ws_books.row_values(1)]
-                        try:
-                            c_tag = headers.index("tags") + 1
-                            c_year = headers.index("erschienen") + 1
-                            c_teaser = headers.index("teaser") + 1
-                            c_bio = headers.index("bio") + 1
-                        except: st.error("Tabellenstruktur falsch"); st.stop()
+                        ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
                         
-                        done = 0
-                        for idx in missing_indices:
-                            row = df.loc[idx]
-                            status.write(f"Bearbeite: **{row['Titel']}**...")
-                            
-                            ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], model_name)
-                            
-                            if err == "RATE_LIMIT":
-                                status.write("⏳ Rate Limit! Warte 60s...")
-                                time.sleep(60)
-                                # Versuch 2
-                                ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], model_name)
-                            
-                            if ai_data:
-                                try:
-                                    cell = ws_books.find(row["Titel"])
-                                    if ai_data.get("tags"): ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
-                                    if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
-                                    if ai_data.get("teaser"): ws_books.update_cell(cell.row, c_teaser, ai_data["teaser"])
-                                    if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data["bio"])
-                                except: pass
-                            
-                            done += 1
-                            prog_bar.progress(done / missing_count)
-                            # SICHERHEITSPAUSE: 10 Sekunden pro Buch!
-                            time.sleep(10)
+                        if err == "RATE_LIMIT":
+                            status.write("⏳ Rate Limit! Warte 60s...")
+                            time.sleep(60)
+                            ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
                         
-                        status.update(label="Fertig!", state="complete", expanded=False)
-                        del st.session_state.df_books
-                        time.sleep(1)
-                        st.rerun()
+                        if ai_data:
+                            try:
+                                cell = ws_books.find(row["Titel"])
+                                if ai_data.get("tags"): ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
+                                if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
+                                if ai_data.get("teaser"): ws_books.update_cell(cell.row, c_teaser, ai_data["teaser"])
+                                if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data["bio"])
+                            except: pass
+                        
+                        done += 1
+                        prog_bar.progress(done / missing_count)
+                        time.sleep(pause_time) # Dynamische Pause
+                    
+                    status.update(label="Fertig!", state="complete", expanded=False)
+                    del st.session_state.df_books
+                    time.sleep(1)
+                    st.rerun()
         else:
-            st.success("Alle Bücher aktuell.")
+            st.success("Alles aktuell.")
 
     tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"])
     
@@ -439,7 +455,6 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Speichere..."):
                         c, g, y = fetch_meta(t, fa)
-                        # Wir speichern erst mal ohne KI Daten, um den User nicht warten zu lassen
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
                         del st.session_state.df_books
