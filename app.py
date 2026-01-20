@@ -28,18 +28,15 @@ st.markdown("""
     .stButton button:hover { background-color: #e67e22 !important; }
     [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
     .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
-    
-    /* Navigation */
     div[role="radiogroup"] { display: flex; flex-direction: row; justify-content: center; gap: 10px; width: 100%; }
     div[role="radiogroup"] label { background-color: #eaddcf; padding: 10px 20px; border-radius: 8px; border: 1px solid #d35400; cursor: pointer; font-weight: bold; color: #4a3b2a !important; }
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
-    
-    /* Teaser Text in Kachel */
     .tile-teaser { font-size: 0.9em; color: #555; margin-top: 5px; font-style: italic; }
+    .problem-book { font-size: 0.8em; color: #c0392b; margin-top: -10px; margin-bottom: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- BACKEND (CACHED) ---
+# --- BACKEND ---
 @st.cache_resource
 def get_connection():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -81,7 +78,7 @@ def check_structure(ws):
         st.session_state.structure_checked = True
     except: pass
 
-# --- DATA HANDLING ---
+# --- DATA ---
 def get_data_fresh(ws):
     cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio"]
     try:
@@ -145,7 +142,6 @@ def update_full_dataframe(ws, new_df):
     force_reload()
     return True
 
-# --- HELPER: SEARCH & SORT ---
 def filter_and_sort_books(df, query, sort_by):
     if query:
         q = query.lower()
@@ -155,7 +151,6 @@ def filter_and_sort_books(df, query, sort_by):
             df['Tags'].str.lower().str.contains(q, na=False)
         )
         df = df[mask]
-    
     if sort_by == "Autor (A-Z)":
         df['Lastname'] = df['Autor'].apply(lambda x: x.split(' ')[-1] if x and ' ' in x else x)
         df = df.sort_values(by='Lastname', key=lambda col: col.str.lower())
@@ -255,12 +250,23 @@ def fetch_all_ai_data_manual(titel, autor, model_name):
     }}
     """
     txt, err = call_ai_manual(prompt, model_name)
-    if err: return None, err
+    if err:
+        # FALLBACK WENN AI FEHLSCHLÄGT
+        # Wir geben ein "leeres" Objekt zurück, damit es im Sheet gespeichert wird
+        # und nicht als "missing" im Loop hängen bleibt.
+        return {
+            "tags": "-", 
+            "year": "", 
+            "teaser": "Keine automatischen Infos verfügbar.", 
+            "bio": "-"
+        }, err
     try: return json.loads(txt), None
-    except: return None, "JSON Fehler"
-
-def cleanup_author_duplicates_batch(ws_books, ws_authors):
-    pass 
+    except: return {
+            "tags": "-", 
+            "year": "", 
+            "teaser": "Formatierungsfehler der KI.", 
+            "bio": "-"
+        }, "JSON Error"
 
 def smart_author(short, known):
     s = short.strip().lower()
@@ -361,6 +367,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 except: col_teaser = len(headers) + 3
                 try: col_bio = headers.index("bio") + 1
                 except: col_bio = len(headers) + 4
+                
                 ws_books.update_cell(cell.row, col_t, new_title)
                 ws_books.update_cell(cell.row, col_a, new_author)
                 ws_books.update_cell(cell.row, col_c, final_cover)
@@ -395,17 +402,13 @@ def main():
         st.markdown(f"🔗 [**📂 Tabelle öffnen**](https://docs.google.com/spreadsheets/d/{sh.id})")
         if st.button("🔄 Cache leeren"): force_reload(); st.rerun()
         if st.button("🛠️ Schreibtest"):
-            try:
-                ws_logs.update_cell(1, 3, "TEST_OK")
-                log_to_sheet(ws_logs, "Manueller Test-Log", "DEBUG")
-                st.success("Erfolg!")
+            try: ws_logs.update_cell(1, 3, "TEST_OK"); log_to_sheet(ws_logs, "Test", "DEBUG"); st.success("Erfolg!")
             except Exception as e: st.error(f"Fehler: {e}")
         
         st.markdown("---")
         if "available_models_list" not in st.session_state:
             with st.spinner("Lade Modelle..."):
-                if "gemini_api_key" in st.secrets:
-                    st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
+                if "gemini_api_key" in st.secrets: st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
                 else: st.session_state.available_models_list = []
         models = st.session_state.available_models_list
         default_idx = 0
@@ -426,6 +429,11 @@ def main():
         
         if missing_count > 0:
             st.info(f"{missing_count} Bücher offen.")
+            # LISTE DER PROBLEM-BÜCHER ANZEIGEN
+            if missing_count < 10:
+                for idx in missing_indices:
+                    st.markdown(f"<div class='problem-book'>• {df.loc[idx]['Titel']}</div>", unsafe_allow_html=True)
+            
             if st.button("✨ Infos laden"):
                 if not selected_model: st.error("Kein Modell!"); st.stop()
                 with st.status(f"Starte mit {selected_model}...", expanded=True) as status:
@@ -441,11 +449,19 @@ def main():
                         row = df.loc[idx]
                         status.write(f"Bearbeite: **{row['Titel']}**...")
                         log_to_sheet(ws_logs, f"Auto-Update: {row['Titel']}", "AI_JOB")
+                        
+                        # HIER IST DER FIX: Fallback Werte werden zurückgegeben, wenn KI crashed
                         ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
-                        if err == "RATE_LIMIT":
-                            status.write("⏳ Limit! Warte 60s...")
-                            time.sleep(60)
-                            ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
+                        
+                        if err and err != "JSON Error": # Bei harten Fehlern (Rate Limit) warnen
+                            if err == "RATE_LIMIT":
+                                status.write("⏳ Limit! Warte 60s...")
+                                time.sleep(60)
+                                ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
+                            else:
+                                log_to_sheet(ws_logs, f"Fehler bei {row['Titel']}: {err}", "ERROR")
+
+                        # Auch wenn ai_data "Fallback" ist, wird es gespeichert -> Teaser ist dann nicht mehr leer -> Counter sinkt
                         if ai_data:
                             try:
                                 cell = ws_books.find(row["Titel"])
@@ -453,11 +469,17 @@ def main():
                                 if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
                                 if ai_data.get("teaser"): ws_books.update_cell(cell.row, c_teaser, ai_data["teaser"])
                                 if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data["bio"])
-                                log_to_sheet(ws_logs, f"KI Daten gespeichert: {row['Titel']}", "SUCCESS")
+                                
+                                if "Keine automatischen" in ai_data.get("teaser", ""):
+                                    log_to_sheet(ws_logs, f"Fallback gesetzt für: {row['Titel']}", "WARN")
+                                else:
+                                    log_to_sheet(ws_logs, f"KI Daten gespeichert: {row['Titel']}", "SUCCESS")
                             except Exception as e: log_to_sheet(ws_logs, f"Sheet Error: {e}", "ERROR")
+                        
                         done += 1
                         prog_bar.progress(done / missing_count)
                         time.sleep(pause_time)
+                    
                     force_reload()
                     status.update(label="Fertig!", state="complete", expanded=False)
                     time.sleep(1); st.rerun()
@@ -541,7 +563,6 @@ def main():
                         c_img, c_content = st.columns([1, 2])
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                            # Buttons nebeneinander unter dem Bild
                             b1, b2 = st.columns([4, 1])
                             if b1.button("ℹ️ Info", key=f"inf_{idx}_{is_wishlist}", use_container_width=True): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
@@ -556,7 +577,6 @@ def main():
                                 except: s_val = 0
                                 if s_val > 0: st.markdown(f"<span style='color:#d35400'>{'★'*s_val}</span>", unsafe_allow_html=True)
                             
-                            # TEASER ANZEIGEN
                             teaser_text = row.get("Teaser", "")
                             if teaser_text and len(str(teaser_text)) > 5:
                                 short_teaser = str(teaser_text)[:200] + "..." if len(str(teaser_text)) > 200 else str(teaser_text)
@@ -602,21 +622,17 @@ def main():
             c1.metric("Gelesen", len(df_r))
             c2.metric("Top Autor", df_r["Autor"].mode()[0] if not df_r.empty else "-")
             st.markdown("---")
-            
             all_tags = []
             if "Tags" in df_r.columns:
                 for t in df_r["Tags"].dropna():
                     tags = [x.strip() for x in str(t).split(",") if x.strip()]
                     all_tags.extend(tags)
-            
             if all_tags:
                 st.subheader("🏆 Top 3 Themen")
                 tag_counts = pd.Series(all_tags).value_counts().head(3)
-                
                 c_top = st.columns(3)
                 for i, (tag, count) in enumerate(tag_counts.items()):
                     c_top[i].metric(label=f"Platz {i+1}", value=tag, delta=f"{count} Bücher")
-            
             st.markdown("---")
             with st.expander("👥 Alle Autoren (Datenbank)"):
                 st.write(", ".join(sorted(authors)))
