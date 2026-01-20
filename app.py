@@ -250,7 +250,6 @@ def check_api_key_models():
                 return None, "Keine Modelle gefunden."
             
             # --- PRIORITÄTS-LOGIK ---
-            # Wir suchen gezielt nach Modellen mit gutem Limit
             priority_list = [
                 "gemini-1.5-flash",
                 "gemini-1.5-flash-8b",
@@ -260,21 +259,17 @@ def check_api_key_models():
             ]
             
             best_model = None
-            
-            # 1. Prüfe Priority List
             for p in priority_list:
                 if p in valid_models:
                     best_model = p
                     break
             
-            # 2. Wenn nix gefunden, nimm IRGENDEINS, aber vermeide "2.5"
             if not best_model:
                 for m in valid_models:
-                    if "2.5" not in m: # 2.5 vermeiden!
+                    if "2.5" not in m: # 2.5 vermeiden
                         best_model = m
                         break
             
-            # 3. Notfall: Nimm das allererste (auch wenn es 2.5 ist)
             if not best_model: best_model = valid_models[0]
             
             return best_model, None
@@ -286,7 +281,6 @@ def check_api_key_models():
 
 # --- UNIVERSELLER CALLER ---
 def call_gemini(prompt):
-    # Modell holen (aus Session State oder frisch prüfen)
     if "working_model" not in st.session_state:
         model, err = check_api_key_models()
         if not model: return None, f"FATAL: {err}"
@@ -310,7 +304,6 @@ def call_gemini(prompt):
         elif response.status_code == 429:
             return None, "Rate Limit (429) - Bitte warten"
         else:
-            # Falls das Modell doch nicht geht (z.B. 404), Session löschen und neu suchen
             if "working_model" in st.session_state: del st.session_state.working_model
             return None, f"Fehler {response.status_code}"
     except Exception as e: return None, str(e)
@@ -433,6 +426,95 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in sorted(list(final_authors))])
     return 1
 
+# --- HIER IST DIE FUNKTION, DIE FEHLTE ---
+@st.dialog("📖 Buch-Details")
+def show_book_details(book, ws_books, ws_authors):
+    d_tab1, d_tab2 = st.tabs(["ℹ️ Info", "✏️ Bearbeiten"])
+    
+    with d_tab1:
+        st.markdown(f"### {book['Titel']}")
+        year_val = book.get('Erschienen')
+        year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
+        st.markdown(f"**von {book['Autor']}{year_str}**")
+        
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            cov = book["Cover"] if book["Cover"] != "-" else "https://via.placeholder.com/200x300?text=No+Cover"
+            st.markdown(f'<img src="{cov}" style="width:100%; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">', unsafe_allow_html=True)
+            st.write("")
+            if book.get('Bewertung'):
+                st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
+            
+            if "Tags" in book and book["Tags"]:
+                st.write("")
+                tags_list = book["Tags"].split(",")
+                tag_html = ""
+                for t in tags_list:
+                    tag_html += f'<span class="book-tag">{t.strip()}</span>'
+                st.markdown(tag_html, unsafe_allow_html=True)
+            
+        with col2:
+            ai_data = None
+            if "gemini_api_key" in st.secrets:
+                with st.spinner("✨ KI liest..."):
+                    ai_data = get_ai_book_info(book["Titel"], book["Autor"])
+            else: st.warning("Kein API Key.")
+
+            if ai_data:
+                st.markdown(f"""
+                <div class="ai-box">
+                    <b>📖 Worum geht's?</b><br>{ai_data.get('teaser', 'Ladefehler')}
+                </div>
+                <div class="ai-box" style="border-left-color: #2980b9; background-color: #eaf2f8; margin-top:10px;">
+                    <b>👤 Autor</b><br>{ai_data.get('bio', '-')}
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            wiki_book = f"https://de.wikipedia.org/w/index.php?search={urllib.parse.quote(book['Titel'])}"
+            google_search = f"https://www.google.com/search?q={urllib.parse.quote(book['Titel'] + ' ' + book['Autor'])}"
+            st.markdown(f"[🔍 Google]({google_search}) | [📖 Wiki]({wiki_book})")
+
+    with d_tab2:
+        st.write("Daten bearbeiten.")
+        with st.form("edit_book_form"):
+            new_title = st.text_input("Titel", value=book["Titel"])
+            new_author = st.text_input("Autor", value=book["Autor"])
+            current_y = book.get("Erschienen", "")
+            new_year = st.text_input("Erscheinungsjahr", value=current_y)
+            current_tags = book.get("Tags", "")
+            new_tags = st.text_input("Tags", value=current_tags)
+            
+            if st.form_submit_button("💾 Änderungen speichern"):
+                try:
+                    cell = ws_books.find(book["Titel"])
+                    headers = [str(h).lower() for h in ws_books.row_values(1)]
+                    col_t = headers.index("titel") + 1
+                    col_a = headers.index("autor") + 1
+                    try: col_tags = headers.index("tags") + 1
+                    except: col_tags = len(headers) + 1 
+                    try: col_y = headers.index("erschienen") + 1
+                    except: col_y = len(headers) + 2
+                    
+                    ws_books.update_cell(cell.row, col_t, new_title)
+                    ws_books.update_cell(cell.row, col_a, new_author)
+                    ws_books.update_cell(cell.row, col_tags, new_tags)
+                    ws_books.update_cell(cell.row, col_y, new_year)
+                    cleanup_author_duplicates_batch(ws_books, ws_authors)
+                    del st.session_state.df_books
+                    st.success("Gespeichert!")
+                    time.sleep(1); st.rerun()
+                except: st.error("Fehler beim Speichern")
+
+        st.markdown("---")
+        st.markdown("**Gefahrenzone**")
+        if st.button("🗑️ Buch unwiderruflich löschen", type="primary"):
+            if delete_book(ws_books, book["Titel"]):
+                del st.session_state.df_books
+                st.success("Gelöscht!")
+                time.sleep(1); st.rerun()
+            else: st.error("Fehler beim Löschen.")
+
 # --- MAIN ---
 def main():
     st.title("📚 Meine Bibliothek")
@@ -445,7 +527,6 @@ def main():
     if "df_books" not in st.session_state: 
         with st.spinner("Lade Daten..."): st.session_state.df_books = get_data(ws_books)
     
-    # --- HOTFIX: MIGRATION CHECK ---
     if "df_books" in st.session_state:
         if "Erschienen" not in st.session_state.df_books.columns:
             st.session_state.df_books = get_data(ws_books)
@@ -454,23 +535,19 @@ def main():
     df = st.session_state.df_books
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
-    # --- SIDEBAR ---
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
         
-        # --- DIAGNOSE ANZEIGE ---
         if "working_model" not in st.session_state:
             with st.spinner("Modellsuche (ignoriere 2.5)..."):
                 m, err = check_api_key_models()
                 if m: 
                     st.session_state.working_model = m
                     st.success(f"✅ Verbunden: {m}")
-                else:
-                    st.error(f"❌ Key Fehler: {err}")
-        else:
-            st.success(f"✅ Verbunden: {st.session_state.working_model}")
+                else: st.error(f"❌ Key Fehler: {err}")
+        else: st.success(f"✅ Verbunden: {st.session_state.working_model}")
         
         st.markdown("---")
         st.write("🤖 **KI-Tools**")
@@ -484,7 +561,6 @@ def main():
 
     tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik & Autoren"])
     
-    # --- NEU ---
     with tab_neu:
         st.header("Buch hinzufügen")
         with st.form("add", clear_on_submit=True):
@@ -500,18 +576,15 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Lade Metadaten (inkl. Jahr & Tags)..."):
                         c, g, y = fetch_meta(t, fa)
-                        # KI Tags (REST API)
                         ai_res = get_ai_tags_and_year(t, fa)
                         tags = ai_res["tags"] if ai_res else ""
                         if not y and ai_res: y = ai_res["year"]
-                        
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", tags, y])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
                         del st.session_state.df_books
                     st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
-    # --- SAMMLUNG ---
     with tab_sammlung:
         view = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed")
         df_s = df[df["Status"] == "Gelesen"].copy()
@@ -554,7 +627,6 @@ def main():
                                 first_tag = row["Tags"].split(",")[0]
                                 meta_line += f" • {first_tag}"
                             st.caption(meta_line)
-                            
                             try: star_val = int(row['Bewertung'])
                             except: star_val = 0
                             new_stars = st.feedback("stars", key=f"fb_{idx}")
@@ -564,14 +636,12 @@ def main():
                                     update_single_entry(ws_books, row["Titel"], "Bewertung", user_val)
                                     st.toast("Bewertung gespeichert!"); del st.session_state.df_books; time.sleep(0.2); st.rerun()
                             elif star_val > 0: st.markdown(f"<div style='color:#d35400'>{'★'*star_val}</div>", unsafe_allow_html=True)
-
                             old_n = row["Notiz"]
                             new_n = st.text_area("Notiz", old_n, key=f"n_{idx}", height=70, label_visibility="collapsed")
                             if new_n != old_n:
                                 update_single_entry(ws_books, row["Titel"], "Notiz", new_n)
                                 st.toast("Gespeichert!"); del st.session_state.df_books; time.sleep(0.5); st.rerun()
 
-    # --- MERKLISTE ---
     with tab_merkliste:
         w_view = st.radio("Wunschliste Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed")
         with st.expander("➕ Neuer Wunsch"):
@@ -628,7 +698,6 @@ def main():
                     show_book_details(df_w.loc[sel_idx], ws_books, ws_authors)
         else: st.info("Leer.")
 
-    # --- STATISTIK & AUTOREN ---
     with tab_stats:
         st.header("📊 Statistik & Autoren")
         df_r = df[df["Status"] == "Gelesen"]
@@ -637,7 +706,6 @@ def main():
         if not df_r.empty:
             top = df_r["Autor"].mode()[0]
             c2.metric("Top Autor", top)
-            
             st.markdown("---")
             st.subheader("Lieblings-Themen (Tags)")
             all_tags = []
@@ -648,7 +716,6 @@ def main():
                     tag_counts = pd.Series(all_tags).value_counts().reset_index()
                     tag_counts.columns = ["Thema", "Anzahl"]
                     st.dataframe(tag_counts, use_container_width=True, hide_index=True)
-            
             st.markdown("---")
             st.subheader("👥 Autoren Liste")
             auth_counts = df_r["Autor"].value_counts().reset_index()
