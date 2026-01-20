@@ -53,7 +53,7 @@ def setup_sheets(client):
 
 def log_event(ws_logs, message, msg_type="INFO"):
     try:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now().strftime("%H:%M:%S")
         ws_logs.append_row([ts, msg_type, str(message)])
     except: pass
 
@@ -176,7 +176,7 @@ def call_gemini(prompt, model_name):
                 txt = res['candidates'][0]['content']['parts'][0]['text']
                 return clean_json_string(txt), None
             except: return None, f"Parse Fehler. Raw: {response.text}"
-        elif response.status_code == 429: return None, "Rate Limit (429)"
+        elif response.status_code == 429: return None, "RATELIMIT" # Spezielles Keyword
         elif response.status_code == 404: return None, f"Modell nicht gefunden (404)"
         else: return None, f"HTTP Fehler {response.status_code}: {response.text}"
     except Exception as e: return None, str(e)
@@ -190,6 +190,7 @@ def fetch_all_ai_data_debug(titel, autor, model_name, ws_logs):
     txt, err = call_gemini(prompt, model_name)
     
     if err:
+        if "RATELIMIT" in err: return "RATELIMIT" # Fehler hochreichen
         log_event(ws_logs, f"KI Fehler bei '{titel}': {err}", "ERROR")
         return {}
     
@@ -200,7 +201,7 @@ def fetch_all_ai_data_debug(titel, autor, model_name, ws_logs):
         log_event(ws_logs, f"JSON Parse Error bei '{titel}': {str(e)}", "ERROR")
         return {}
 
-# --- BACKGROUND WORKER ---
+# --- BACKGROUND WORKER (SINGLETON) ---
 def background_worker_process(missing_books_data, creds_dict):
     try:
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -212,17 +213,16 @@ def background_worker_process(missing_books_data, creds_dict):
         try: ws_logs = sh.worksheet("Logs")
         except: ws_logs = sh.add_worksheet("Logs", 1000, 3)
         
-        log_event(ws_logs, "Hintergrund-Prozess gestartet.", "START")
+        log_event(ws_logs, "Autopilot gestartet (Singleton).", "START")
         
-        # MODELL SUCHE 
         api_key = st.secrets["gemini_api_key"]
         model_name = find_working_model_pure(api_key)
         
         if not model_name:
-            log_event(ws_logs, "FATAL: Kein Modell im Hintergrund gefunden!", "ERROR")
+            log_event(ws_logs, "Kein Modell im Hintergrund gefunden!", "ERROR")
             return
             
-        log_event(ws_logs, f"Background Worker nutzt Modell: {model_name}", "INIT")
+        log_event(ws_logs, f"Nutze Modell: {model_name}", "INIT")
         
         headers = [str(h).lower() for h in ws.row_values(1)]
         c_tag = headers.index("tags") + 1
@@ -231,26 +231,34 @@ def background_worker_process(missing_books_data, creds_dict):
         c_bio = headers.index("bio") + 1
 
         for book in missing_books_data:
-            time.sleep(8) # Pause gegen Rate Limit
+            # Schneller Start für den ersten, dann Pausen
+            time.sleep(5) 
+            
             titel = book['Titel']
             log_event(ws_logs, f"Bearbeite: {titel}", "INFO")
             
             ai_data = fetch_all_ai_data_debug(titel, book['Autor'], model_name, ws_logs)
             
-            if ai_data:
+            if ai_data == "RATELIMIT":
+                log_event(ws_logs, f"Rate Limit! Warte 60s...", "WARN")
+                time.sleep(60) # Strafbank
+                # Versuch es für das gleiche Buch nochmal beim nächsten Loop oder überspring
+                continue 
+            
+            if isinstance(ai_data, dict) and ai_data:
                 try:
                     cell = ws.find(titel)
                     if ai_data.get("tags"): ws.update_cell(cell.row, c_tag, ai_data["tags"])
                     if ai_data.get("year"): ws.update_cell(cell.row, c_year, ai_data["year"])
                     if ai_data.get("teaser"): ws.update_cell(cell.row, c_teaser, ai_data["teaser"])
                     if ai_data.get("bio"): ws.update_cell(cell.row, c_bio, ai_data["bio"])
-                    log_event(ws_logs, f"Gespeichert: {titel}", "SUCCESS")
+                    log_event(ws_logs, f"Erfolg: {titel}", "SUCCESS")
                 except Exception as e:
                     log_event(ws_logs, f"Sheet Fehler: {str(e)}", "ERROR")
             else:
-                log_event(ws_logs, f"Keine Daten für {titel} erhalten.", "WARN")
+                log_event(ws_logs, f"Keine Daten erhalten für {titel}", "WARN")
                 
-        log_event(ws_logs, "Hintergrund-Prozess fertig.", "END")
+        log_event(ws_logs, "Alle Aufträge erledigt.", "END")
                 
     except Exception as e:
         print(f"Background Crash: {e}")
@@ -332,31 +340,25 @@ def main():
     df = st.session_state.df_books
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
-    # --- BACKGROUND CHECK ---
+    # --- BACKGROUND CHECK (SINGLETON) ---
     
-    # Initialsierung der "Bereits versucht"-Liste für diese Session
-    if "attempted_books" not in st.session_state:
-        st.session_state.attempted_books = set()
-
-    # Wir prüfen nur Bücher, die wir in DIESER Session noch nicht probiert haben
-    missing_books_candidates = []
-    if not df.empty:
-        for i, r in df.iterrows():
-            # Kriterien: Teaser fehlt ODER Tags fehlen
-            if len(str(r.get("Teaser", ""))) < 5 or len(str(r.get("Tags", ""))) < 2:
-                # Prüfen, ob wir es schon versucht haben
-                if r['Titel'] not in st.session_state.attempted_books:
-                    missing_books_candidates.append(r.to_dict())
-                    # SOFORT auf die "Erledigt"-Liste, damit beim nächsten Reload nicht nochmal gesucht wird
-                    st.session_state.attempted_books.add(r['Titel'])
+    # Check if thread is already running
+    is_running = any(t.name == "BackgroundWorker" for t in threading.enumerate())
     
-    # Wenn Kandidaten übrig sind, starte EINEN Thread
-    if missing_books_candidates:
-        creds = dict(st.secrets["gcp_service_account"])
-        t = threading.Thread(target=background_worker_process, args=(missing_books_candidates, creds))
-        t.start()
-        # Optional: Toast Message
-        st.toast(f"Hintergrund-Suche für {len(missing_books_candidates)} Bücher gestartet.")
+    if not is_running:
+        missing_books = []
+        if not df.empty:
+            for i, r in df.iterrows():
+                # Nur fehlende bearbeiten
+                if len(str(r.get("Teaser", ""))) < 5 or len(str(r.get("Tags", ""))) < 2:
+                    missing_books.append(r.to_dict())
+        
+        if missing_books:
+            creds = dict(st.secrets["gcp_service_account"])
+            # Thread mit festem Namen starten
+            t = threading.Thread(target=background_worker_process, args=(missing_books, creds), name="BackgroundWorker")
+            t.start()
+            st.toast(f"Hintergrund-Dienst gestartet ({len(missing_books)} Bücher)")
 
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
@@ -371,7 +373,7 @@ def main():
                 last_logs = logs[-6:]
                 log_text = ""
                 for l in reversed(last_logs):
-                    log_text += f"[{l[0].split(' ')[1]}] {l[2]}\n"
+                    log_text += f"[{l[0].split(' ')[0]}] {l[2]}\n"
                 st.markdown(f"<div class='log-box'>{log_text}</div>", unsafe_allow_html=True)
             else: st.info("Keine Logs.")
         except: st.warning("Log-Fehler")
