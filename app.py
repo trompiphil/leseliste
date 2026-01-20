@@ -109,12 +109,60 @@ def get_data(ws):
 def force_reload():
     if "df_books" in st.session_state: del st.session_state.df_books
 
+# --- AUTOMATIC CLEANUP (THE MAGIC) ---
+def auto_cleanup_authors(ws_books):
+    """
+    Läuft automatisch im Hintergrund.
+    Sucht nach 'kurzen' Autorennamen und ersetzt sie durch 'lange' Versionen,
+    wenn diese existieren (z.B. Novik -> Naomi Novik).
+    """
+    try:
+        all_vals = ws_books.get_all_values()
+        if len(all_vals) < 2: return
+        
+        headers = [str(h).lower() for h in all_vals[0]]
+        idx_a = headers.index("autor")
+        
+        # 1. Mapping erstellen
+        import unicodedata
+        def clean(t): return unicodedata.normalize('NFKC', str(t)).strip()
+        
+        raw_authors = [clean(row[idx_a]) for row in all_vals[1:] if len(row) > idx_a and row[idx_a]]
+        unique_authors = sorted(list(set(raw_authors)), key=len, reverse=True) # Längste zuerst
+        
+        replacements = {}
+        for long in unique_authors:
+            for short in unique_authors:
+                if long == short: continue
+                # Wenn kurz in lang enthalten ist UND lang deutlich länger ist (vermeidet falsche Matches)
+                if short in long and len(long) > len(short) + 2:
+                    if short not in replacements:
+                        replacements[short] = long
+        
+        if not replacements: return # Nichts zu tun
+        
+        # 2. Anwenden
+        updates = []
+        for i, row in enumerate(all_vals):
+            if i == 0: continue
+            if len(row) > idx_a:
+                current = clean(row[idx_a])
+                if current in replacements:
+                    # Batch Update vorbereiten oder direkt schreiben
+                    ws_books.update_cell(i+1, idx_a+1, replacements[current])
+                    time.sleep(0.2) # Sanft zur API
+    except: pass # Silent fail im Background
+
 def update_single_entry(ws, titel, field, value):
     try:
         cell = ws.find(titel)
         headers = [str(h).lower() for h in ws.row_values(1)]
         col = headers.index(field.lower()) + 1
         ws.update_cell(cell.row, col, value)
+        
+        # AUTO CLEANUP TRIGGER
+        if field.lower() == "autor": auto_cleanup_authors(ws)
+        
         force_reload()
         return True
     except: return False
@@ -139,6 +187,10 @@ def update_full_dataframe(ws, new_df):
             if "Notiz" in row: ws.update_cell(cell.row, col_idx["notiz"]+1, row["Notiz"])
             time.sleep(0.2)
         except: pass
+    
+    # AUTO CLEANUP TRIGGER
+    auto_cleanup_authors(ws)
+    
     force_reload()
     return True
 
@@ -200,13 +252,6 @@ def fetch_meta_single(titel, autor):
     return c, "Roman", datetime.now().strftime("%Y") 
 
 # --- AI CORE ---
-def clean_json_string(text):
-    try:
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match: return match.group(0)
-        return text
-    except: return text
-
 @st.cache_data(show_spinner=False)
 def get_available_models(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -231,7 +276,9 @@ def call_ai_manual(prompt, model_name):
             try:
                 res = response.json()
                 txt = res['candidates'][0]['content']['parts'][0]['text']
-                return clean_json_string(txt), None
+                match = re.search(r'\{[\s\S]*\}', txt)
+                if match: return match.group(0), None
+                return txt, None
             except: return None, "Parse Fehler"
         elif response.status_code == 429: return None, "RATE_LIMIT"
         else: return None, f"Fehler {response.status_code}"
@@ -250,21 +297,21 @@ def fetch_all_ai_data_manual(titel, autor, model_name):
     }}
     """
     txt, err = call_ai_manual(prompt, model_name)
-    if err:
-        # FALLBACK WENN AI FEHLSCHLÄGT
-        # Wir geben ein "leeres" Objekt zurück, damit es im Sheet gespeichert wird
-        # und nicht als "missing" im Loop hängen bleibt.
-        return {
-            "tags": "-", 
-            "year": "", 
-            "teaser": "Keine automatischen Infos verfügbar.", 
-            "bio": "-"
-        }, err
+    
+    # Fallback-Objekt, damit "Fehler" gespeichert wird und Buch nicht als "offen" bleibt
+    fallback = {
+        "tags": "-", "year": "", 
+        "teaser": f"Keine automatischen Infos verfügbar. ({err})" if err else "Keine automatischen Infos verfügbar.", 
+        "bio": "-"
+    }
+    
+    if err: return fallback, err
     try: return json.loads(txt), None
-    except: return {
-            "tags": "-", 
-            "year": "", 
-            "teaser": "Formatierungsfehler der KI.", 
+    except: 
+        # Wenn JSON kaputt ist, nehmen wir trotzdem Fallback, damit der Loop weitergeht
+        return {
+            "tags": "-", "year": "", 
+            "teaser": "Keine automatischen Infos verfügbar (JSON Fehler).", 
             "bio": "-"
         }, "JSON Error"
 
@@ -296,6 +343,8 @@ def open_cover_gallery(book, ws_books, ws_logs):
                         except: c_col = 5
                         ws_books.update_cell(cell.row, c_col, img_url)
                         log_to_sheet(ws_logs, f"Neues Cover gesetzt: {book['Titel']}", "UPDATE")
+                        # AUTO CLEANUP
+                        auto_cleanup_authors(ws_books)
                         force_reload()
                         del st.session_state.gallery_images
                         st.rerun()
@@ -375,7 +424,11 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 ws_books.update_cell(cell.row, col_y, new_year)
                 ws_books.update_cell(cell.row, col_teaser, new_teaser)
                 ws_books.update_cell(cell.row, col_bio, new_bio)
+                
+                # AUTO CLEANUP
+                auto_cleanup_authors(ws_books)
                 force_reload()
+                
                 if "selected_inline_cover" in st.session_state: del st.session_state.selected_inline_cover
                 log_to_sheet(ws_logs, f"Update: {new_title}", "SAVE")
                 st.success("Gespeichert!"); st.balloons(); time.sleep(1); st.rerun()
@@ -423,16 +476,17 @@ def main():
         missing_indices = []
         if not df.empty:
             for i, r in df.iterrows():
-                if len(str(r.get("Teaser", ""))) < 5:
+                # Definiere "Offen" neu: Zu kurz ODER enthält Fehlermeldung
+                teaser = str(r.get("Teaser", ""))
+                is_error = "Fehler" in teaser or "Keine automatischen" in teaser or "Formatierungsfehler" in teaser
+                if len(teaser) < 5 or is_error:
                     missing_count += 1
                     missing_indices.append(i)
         
         if missing_count > 0:
             st.info(f"{missing_count} Bücher offen.")
-            # LISTE DER PROBLEM-BÜCHER ANZEIGEN
             if missing_count < 10:
-                for idx in missing_indices:
-                    st.markdown(f"<div class='problem-book'>• {df.loc[idx]['Titel']}</div>", unsafe_allow_html=True)
+                for idx in missing_indices: st.markdown(f"<div class='problem-book'>• {df.loc[idx]['Titel']}</div>", unsafe_allow_html=True)
             
             if st.button("✨ Infos laden"):
                 if not selected_model: st.error("Kein Modell!"); st.stop()
@@ -449,37 +503,29 @@ def main():
                         row = df.loc[idx]
                         status.write(f"Bearbeite: **{row['Titel']}**...")
                         log_to_sheet(ws_logs, f"Auto-Update: {row['Titel']}", "AI_JOB")
-                        
-                        # HIER IST DER FIX: Fallback Werte werden zurückgegeben, wenn KI crashed
                         ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
                         
-                        if err and err != "JSON Error": # Bei harten Fehlern (Rate Limit) warnen
-                            if err == "RATE_LIMIT":
-                                status.write("⏳ Limit! Warte 60s...")
-                                time.sleep(60)
-                                ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
-                            else:
-                                log_to_sheet(ws_logs, f"Fehler bei {row['Titel']}: {err}", "ERROR")
-
-                        # Auch wenn ai_data "Fallback" ist, wird es gespeichert -> Teaser ist dann nicht mehr leer -> Counter sinkt
+                        if err == "RATE_LIMIT":
+                            status.write("⏳ Limit! Warte 60s...")
+                            time.sleep(60)
+                            ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
+                        
                         if ai_data:
                             try:
                                 cell = ws_books.find(row["Titel"])
-                                if ai_data.get("tags"): ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
+                                if ai_data.get("tags") and ai_data["tags"] != "-": ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
                                 if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
-                                if ai_data.get("teaser"): ws_books.update_cell(cell.row, c_teaser, ai_data["teaser"])
-                                if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data["bio"])
-                                
-                                if "Keine automatischen" in ai_data.get("teaser", ""):
-                                    log_to_sheet(ws_logs, f"Fallback gesetzt für: {row['Titel']}", "WARN")
-                                else:
-                                    log_to_sheet(ws_logs, f"KI Daten gespeichert: {row['Titel']}", "SUCCESS")
-                            except Exception as e: log_to_sheet(ws_logs, f"Sheet Error: {e}", "ERROR")
-                        
+                                # Teaser/Bio IMMER updaten, auch wenn es der Error-Text ist, damit Zähler sinkt
+                                ws_books.update_cell(cell.row, c_teaser, ai_data.get("teaser", "-"))
+                                if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data.get("bio", "-"))
+                                log_to_sheet(ws_logs, f"Gespeichert: {row['Titel']}", "SUCCESS")
+                            except Exception as e: log_to_sheet(ws_logs, f"Error: {e}", "ERROR")
                         done += 1
                         prog_bar.progress(done / missing_count)
                         time.sleep(pause_time)
                     
+                    # AUTO CLEANUP AM ENDE DES BATCHES
+                    auto_cleanup_authors(ws_books)
                     force_reload()
                     status.update(label="Fertig!", state="complete", expanded=False)
                     time.sleep(1); st.rerun()
@@ -523,6 +569,9 @@ def main():
                         c, g, y = fetch_meta_single(t, fa)
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         log_to_sheet(ws_logs, f"Neu: {t}", "NEW")
+                        
+                        # AUTO CLEANUP
+                        auto_cleanup_authors(ws_books)
                         force_reload()
                     st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
@@ -568,7 +617,6 @@ def main():
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
                             if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover"):
                                 open_cover_gallery(row, ws_books, ws_logs)
-                        
                         with c_content:
                             st.write(f"**{row['Titel']}**")
                             st.caption(f"{row['Autor']}")
@@ -581,8 +629,7 @@ def main():
                             if teaser_text and len(str(teaser_text)) > 5:
                                 short_teaser = str(teaser_text)[:200] + "..." if len(str(teaser_text)) > 200 else str(teaser_text)
                                 st.markdown(f"<div class='tile-teaser'>{short_teaser}</div>", unsafe_allow_html=True)
-                            else:
-                                st.caption("Noch kein Teaser.")
+                            else: st.caption("Noch kein Teaser.")
 
                             if is_wishlist:
                                 if st.button("✅ Gelesen", key=f"read_{idx}"):
@@ -607,6 +654,9 @@ def main():
                         fa = smart_author(a, authors)
                         c, g, y = fetch_meta_single(t, fa)
                         ws_books.append_row([t, fa, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", "", y or "", "", ""])
+                        
+                        # AUTO CLEANUP
+                        auto_cleanup_authors(ws_books)
                         force_reload()
                         log_to_sheet(ws_logs, f"Wunsch: {t}", "WISH"); st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
         df_w = df[df["Status"] == "Wunschliste"].copy()
