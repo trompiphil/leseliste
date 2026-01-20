@@ -47,14 +47,17 @@ def get_connection():
     return None
 
 def setup_sheets(client):
+    # Wir geben jetzt auch das Spreadsheet-Objekt 'sh' zurück, um die ID/URL zu bekommen
     try: sh = client.open("Bücherliste") 
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
+    
     ws_books = sh.sheet1
     try: ws_logs = sh.worksheet("Logs")
     except: ws_logs = sh.add_worksheet(title="Logs", rows=1000, cols=3); ws_logs.append_row(["Zeitstempel", "Typ", "Nachricht"])
     try: ws_authors = sh.worksheet("Autoren")
     except: ws_authors = sh.add_worksheet(title="Autoren", rows=1000, cols=1); ws_authors.update_cell(1, 1, "Name")
-    return ws_books, ws_logs, ws_authors
+    
+    return sh, ws_books, ws_logs, ws_authors
 
 def log_to_sheet(ws_logs, message, msg_type="INFO"):
     """Schreibt Log zwingend ins Sheet"""
@@ -62,7 +65,7 @@ def log_to_sheet(ws_logs, message, msg_type="INFO"):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ws_logs.append_row([ts, msg_type, str(message)])
     except Exception as e:
-        st.error(f"LOGGING FEHLER: {e}") # Zeigt den Fehler direkt in der App an
+        st.error(f"LOGGING FEHLER: {e}")
 
 def check_structure(ws):
     try:
@@ -277,12 +280,11 @@ def smart_author(short, known):
         if s in str(k).lower(): return k
     return short
 
-# --- COVER GALERIE DIALOG (Wird für beide Buttons genutzt) ---
+# --- COVER GALERIE DIALOG ---
 @st.dialog("🖼️ Cover auswählen")
 def open_cover_gallery(book, ws_books, ws_logs):
     st.write(f"Suche Cover für **{book['Titel']}**...")
     
-    # Zustand merken, damit wir nicht bei jedem Klick neu suchen
     if "gallery_images" not in st.session_state:
         with st.spinner("Durchsuche das Internet..."):
             log_to_sheet(ws_logs, f"Manuelle Suche für: {book['Titel']}", "SEARCH")
@@ -296,7 +298,6 @@ def open_cover_gallery(book, ws_books, ws_logs):
         for i, img_url in enumerate(st.session_state.gallery_images):
             with cols[i % 3]:
                 st.image(img_url, use_container_width=True)
-                # SOFORTIGE AKTION
                 if st.button("Übernehmen", key=f"gal_btn_{i}"):
                     try:
                         cell = ws_books.find(book["Titel"])
@@ -307,10 +308,8 @@ def open_cover_gallery(book, ws_books, ws_logs):
                         ws_books.update_cell(cell.row, c_col, img_url)
                         log_to_sheet(ws_logs, f"Neues Cover gesetzt: {book['Titel']}", "UPDATE")
                         
-                        # Cache leeren und Reload
                         del st.session_state.df_books
                         del st.session_state.gallery_images
-                        st.session_state.force_reload = True # Signal für Rerun
                         st.rerun()
                     except Exception as e:
                         st.error(f"Fehler: {e}")
@@ -319,7 +318,7 @@ def open_cover_gallery(book, ws_books, ws_logs):
         st.warning("Keine passenden Bilder gefunden.")
         if st.button("Abbrechen"): st.rerun()
 
-# --- HAUPT DIALOG (INFO & EDIT) ---
+# --- HAUPT DIALOG ---
 @st.dialog("📖 Buch-Details")
 def show_book_details(book, ws_books, ws_authors, ws_logs):
     t1, t2 = st.tabs(["ℹ️ Info", "✏️ Bearbeiten"])
@@ -359,15 +358,11 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
         current_cover = book.get("Cover", "")
         new_cover_url = st.text_input("Cover URL (manuell)", value=current_cover)
         
-        # NEU: Galerie Button auch hier
+        # GALERIE BUTTON HIER (übernimmt URL in das Textfeld, speichert aber erst unten)
         if st.button("🔍 Cover online suchen (Galerie)"):
-            # Da wir schon in einem Dialog sind, müssen wir hier tricksen oder einfach das Textfeld füllen lassen
-            # Streamlit erlaubt keine Dialoge in Dialogen. 
-            # Workaround: Wir nutzen Session State um das Bild zu setzen
             with st.spinner("Suche..."):
                 cands = fetch_cover_candidates_loose(book["Titel"], book["Autor"], ws_logs)
-                if cands:
-                    st.session_state.inline_candidates = cands
+                if cands: st.session_state.inline_candidates = cands
                 else: st.warning("Nichts gefunden.")
         
         if "inline_candidates" in st.session_state:
@@ -380,10 +375,9 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                         del st.session_state.inline_candidates
                         st.rerun()
         
-        # Check ob Inline-Auswahl getroffen wurde
         if "selected_inline_cover" in st.session_state:
             new_cover_url = st.session_state.selected_inline_cover
-            st.success("Bild übernommen! Jetzt Speichern klicken.")
+            st.success("Bild übernommen! Jetzt 'Speichern' klicken.")
 
         st.markdown("---")
         new_teaser = st.text_area("Teaser", value=book.get("Teaser", ""))
@@ -393,6 +387,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
             try:
                 cell = ws_books.find(book["Titel"])
                 headers = [str(h).lower() for h in ws_books.row_values(1)]
+                final_cover = st.session_state.get("selected_inline_cover", new_cover_url)
                 
                 col_t = headers.index("titel") + 1
                 col_a = headers.index("autor") + 1
@@ -409,7 +404,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 
                 ws_books.update_cell(cell.row, col_t, new_title)
                 ws_books.update_cell(cell.row, col_a, new_author)
-                ws_books.update_cell(cell.row, col_c, new_cover_url)
+                ws_books.update_cell(cell.row, col_c, final_cover)
                 ws_books.update_cell(cell.row, col_tags, new_tags)
                 ws_books.update_cell(cell.row, col_y, new_year)
                 ws_books.update_cell(cell.row, col_teaser, new_teaser)
@@ -435,12 +430,12 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
 def main():
     st.title("📚 Meine Bibliothek")
     
-    # Cleanup beim Start wenn nötig
+    # Cleanup beim Start
     if "gallery_images" in st.session_state: del st.session_state.gallery_images
     
     client = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
-    ws_books, ws_logs, ws_authors = setup_sheets(client)
+    sh, ws_books, ws_logs, ws_authors = setup_sheets(client) # sh wird jetzt zurückgegeben
     
     if "checked" not in st.session_state: check_structure(ws_books); st.session_state.checked=True
     if "df_books" not in st.session_state: 
@@ -457,6 +452,10 @@ def main():
     
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
+        
+        # --- DER LINK ---
+        st.markdown(f"🔗 [**📂 Öffne verknüpfte Tabelle**](https://docs.google.com/spreadsheets/d/{sh.id})")
+        
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
         
@@ -541,7 +540,7 @@ def main():
                     time.sleep(1); st.rerun()
         else: st.success("Alles aktuell.")
             
-        with st.expander("📜 System-Log"):
+        with st.expander("📜 System-Log (Live Vorschau)"):
             try:
                 logs = ws_logs.get_all_values()
                 if len(logs) > 1:
@@ -600,7 +599,7 @@ def main():
                         if b1.button("ℹ️ Info", key=f"k_{idx}", use_container_width=True): 
                             show_book_details(row, ws_books, ws_authors, ws_logs)
                         
-                        # DER NEUE DIRECT-GALLERY BUTTON
+                        # DER NEUE DIRECT-GALLERY BUTTON (BLAU)
                         if b2.button("🔄", key=f"r_{idx}", help="Cover Galerie öffnen"):
                             open_cover_gallery(row, ws_books, ws_logs)
                         
