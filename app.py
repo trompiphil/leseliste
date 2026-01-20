@@ -33,6 +33,7 @@ st.markdown("""
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
     .tile-teaser { font-size: 0.9em; color: #555; margin-top: 5px; font-style: italic; }
     .problem-book { font-size: 0.8em; color: #c0392b; margin-top: -10px; margin-bottom: 10px; }
+    .year-badge { background-color: #fff8e1; padding: 2px 6px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.8em; color: #d35400; margin-left: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -171,11 +172,7 @@ def update_full_dataframe(ws, new_df):
     force_reload()
     return True
 
-def filter_and_sort_books(df_in, query, sort_by):
-    # WICHTIG: Echte Kopie erstellen, damit wir das Original nicht ändern und Sortierung sauber ist
-    df = df_in.copy()
-    
-    # 1. Filtern
+def filter_and_sort_books(df, query, sort_by):
     if query:
         q = query.lower()
         mask = (
@@ -184,15 +181,11 @@ def filter_and_sort_books(df_in, query, sort_by):
             df['Tags'].str.lower().str.contains(q, na=False)
         )
         df = df[mask]
-    
-    # 2. Sortieren
     if sort_by == "Autor (A-Z)":
-        # Erstelle temporäre Spalte für Nachnamen
-        df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x and str(x).strip() else "")
-        df = df.sort_values(by='sort_key', key=lambda col: col.str.lower())
+        df['Lastname'] = df['Autor'].apply(lambda x: x.split(' ')[-1] if x and ' ' in x else x)
+        df = df.sort_values(by='Lastname', key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
-        
     return df
 
 # --- API HELPERS ---
@@ -395,10 +388,8 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 ws_books.update_cell(cell.row, col_y, new_year)
                 ws_books.update_cell(cell.row, col_teaser, new_teaser)
                 ws_books.update_cell(cell.row, col_bio, new_bio)
-                
                 auto_cleanup_authors(ws_books)
                 force_reload()
-                
                 if "selected_inline_cover" in st.session_state: del st.session_state.selected_inline_cover
                 log_to_sheet(ws_logs, f"Update: {new_title}", "SAVE")
                 st.success("Gespeichert!"); st.balloons(); time.sleep(1); st.rerun()
@@ -434,21 +425,18 @@ def main():
                 if "gemini_api_key" in st.secrets: st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
                 else: st.session_state.available_models_list = []
         models = st.session_state.available_models_list
-        
         # GEMMA 3 27B PRIORITÄT
         default_idx = 0
         search_prio = ["gemma-3-27b", "gemma-3"] 
         found = False
         for prio in search_prio:
             for i, m in enumerate(models):
-                if prio in m:
-                    default_idx = i
-                    found = True
-                    break
+                if prio in m: default_idx = i; found = True; break
             if found: break
-            
+        
         selected_model = st.selectbox("🧠 KI-Modell", models, index=default_idx if models else None)
-        pause_time = 1.0 if (selected_model and "gemma" in selected_model) else 8.0
+        # Store selected model in session state for access in other functions if needed
+        st.session_state.selected_model_name = selected_model 
         
         st.markdown("---")
         st.write("🤖 **KI-Update**")
@@ -500,7 +488,7 @@ def main():
                             except Exception as e: log_to_sheet(ws_logs, f"Error: {e}", "ERROR")
                         done += 1
                         prog_bar.progress(done / missing_count)
-                        time.sleep(pause_time)
+                        time.sleep(1.0)
                     auto_cleanup_authors(ws_books)
                     force_reload()
                     status.update(label="Fertig!", state="complete", expanded=False)
@@ -586,14 +574,43 @@ def main():
                         c_img, c_content = st.columns([1, 2])
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                            b1, b2 = st.columns([4, 1])
-                            if b1.button("ℹ️ Info", key=f"inf_{idx}_{is_wishlist}", use_container_width=True): 
+                            b1, b2, b3 = st.columns([2, 1, 1])
+                            if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
                             if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover"):
                                 open_cover_gallery(row, ws_books, ws_logs)
+                            # --- DER NEUE MAGIC BUTTON ---
+                            if b3.button("✨", key=f"ai_{idx}_{is_wishlist}", help="Infos (Teaser/Bio) neu generieren"):
+                                with st.spinner("Generiere Infos..."):
+                                    # Modell holen
+                                    mod_name = st.session_state.get("selected_model_name", "gemma-3-27b-it")
+                                    ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], mod_name)
+                                    if ai_data:
+                                        try:
+                                            headers = [str(h).lower() for h in ws_books.row_values(1)]
+                                            c_tag = headers.index("tags") + 1
+                                            c_year = headers.index("erschienen") + 1
+                                            c_teaser = headers.index("teaser") + 1
+                                            c_bio = headers.index("bio") + 1
+                                            cell = ws_books.find(row["Titel"])
+                                            
+                                            if ai_data.get("tags") and ai_data["tags"] != "-": ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
+                                            if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
+                                            ws_books.update_cell(cell.row, c_teaser, ai_data.get("teaser", "-"))
+                                            if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data.get("bio", "-"))
+                                            
+                                            log_to_sheet(ws_logs, f"Einzel-Update: {row['Titel']}", "SUCCESS")
+                                            force_reload()
+                                            st.rerun()
+                                        except Exception as e: st.error(f"Fehler: {e}")
+                                    elif err: st.error(f"KI Fehler: {err}")
+
                         with c_content:
                             st.write(f"**{row['Titel']}**")
-                            st.caption(f"{row['Autor']}")
+                            # Jahr neben Autor
+                            year_display = f"<span class='year-badge'>{row.get('Erschienen', '')}</span>" if row.get("Erschienen") else ""
+                            st.markdown(f"<span style='font-size:0.9em; color:#555'>{row['Autor']}</span>{year_display}", unsafe_allow_html=True)
+                            
                             if not is_wishlist:
                                 try: s_val = int(row['Bewertung'])
                                 except: s_val = 0
@@ -664,20 +681,7 @@ def main():
             auth_stats = df_r["Autor"].value_counts().reset_index()
             auth_stats.columns = ["Autor", "Anzahl"]
             auth_stats = auth_stats.sort_values(by=["Anzahl", "Autor"], ascending=[False, True])
-            st.dataframe(
-                auth_stats, 
-                use_container_width=True, 
-                hide_index=True,
-                column_config={
-                    "Autor": st.column_config.TextColumn("Autor"),
-                    "Anzahl": st.column_config.ProgressColumn(
-                        "Gelesen", 
-                        format="%d", 
-                        min_value=0, 
-                        max_value=int(auth_stats["Anzahl"].max())
-                    )
-                }
-            )
+            st.dataframe(auth_stats, use_container_width=True, hide_index=True, column_config={"Autor": st.column_config.TextColumn("Autor"), "Anzahl": st.column_config.ProgressColumn("Gelesen", format="%d", min_value=0, max_value=int(auth_stats["Anzahl"].max()))})
 
 if __name__ == "__main__":
     main()
