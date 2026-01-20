@@ -45,8 +45,9 @@ def setup_sheets(client):
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
     ws_books = sh.sheet1
     
-    # Log Sheet wiederherstellen
-    try: ws_logs = sh.worksheet("Logs")
+    # Sicherstellen, dass Logs existiert
+    try: 
+        ws_logs = sh.worksheet("Logs")
     except: 
         ws_logs = sh.add_worksheet(title="Logs", rows=1000, cols=3)
         ws_logs.append_row(["Zeitstempel", "Typ", "Nachricht"])
@@ -56,11 +57,11 @@ def setup_sheets(client):
     return ws_books, ws_logs, ws_authors
 
 def log_event(ws_logs, message, msg_type="INFO"):
-    """Schreibt Logs in Sheet und Konsole"""
+    """Schreibt Logs zuverlässig in Sheet"""
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ws_logs.append_row([ts, msg_type, str(message)])
-    except: pass # Logging darf App nicht crashen
+    except: pass 
 
 def check_structure(ws):
     try:
@@ -127,30 +128,78 @@ def update_full_dataframe(ws, new_df):
         except: pass
     return True
 
-# --- API HELPERS ---
+# --- SMARTER COVER SEARCH ---
 def process_genre(raw):
     if not raw: return "Roman"
     try: t = GoogleTranslator(source='auto', target='de').translate(raw); return "Roman" if "römisch" in t.lower() else t
     except: return "Roman"
 
-def fetch_meta(titel, autor):
+def fetch_smart_meta(titel, autor, ws_logs=None):
+    """
+    Intelligente Suche: Prüft Autor-Übereinstimmung und sucht bestes Bild.
+    """
     c, g, y = "", "Roman", ""
+    
+    # 1. Google Books API (Mit Autor-Check)
     try:
-        r = requests.get(f"https://www.googleapis.com/books/v1/volumes?q={titel} {autor}&maxResults=1").json()
-        info = r["items"][0]["volumeInfo"]
-        c = info.get("imageLinks", {}).get("thumbnail", "")
-        g = process_genre(info.get("categories", ["Roman"])[0])
-        pub_date = info.get("publishedDate", "")
-        if pub_date: y = pub_date[:4]
-    except: pass
+        # Suche gezielt nach Titel und Autor
+        query = f"intitle:{titel} inauthor:{autor}"
+        url = f"https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(query)}&maxResults=5&langRestrict=de"
+        r = requests.get(url).json()
+        
+        found_item = None
+        
+        if "items" in r:
+            # Wir gehen die Ergebnisse durch und suchen den besten Match
+            for item in r["items"]:
+                info = item.get("volumeInfo", {})
+                authors = info.get("authors", [])
+                
+                # Check: Ist der Autor im Ergebnis enthalten? (Fuzzy Check)
+                author_match = False
+                for a in authors:
+                    if autor.lower() in a.lower() or a.lower() in autor.lower():
+                        author_match = True
+                        break
+                
+                if author_match:
+                    found_item = info
+                    break # Bestes Ergebnis gefunden
+            
+            # Fallback: Wenn kein Autor passt, nimm das erste (besser als nix)
+            if not found_item and r["items"]:
+                found_item = r["items"][0]["volumeInfo"]
+        
+        if found_item:
+            # Genre & Jahr
+            g = process_genre(found_item.get("categories", ["Roman"])[0])
+            pub = found_item.get("publishedDate", "")
+            if pub: y = pub[:4]
+            
+            # Bestes Bild suchen (Extra Large -> Large -> Medium -> Small -> Thumbnail)
+            imgs = found_item.get("imageLinks", {})
+            if "extraLarge" in imgs: c = imgs["extraLarge"]
+            elif "large" in imgs: c = imgs["large"]
+            elif "medium" in imgs: c = imgs["medium"]
+            elif "thumbnail" in imgs: c = imgs["thumbnail"]
+            elif "smallThumbnail" in imgs: c = imgs["smallThumbnail"]
+            
+            # HTTPS erzwingen
+            if c.startswith("http://"): c = c.replace("http://", "https://")
+            
+    except Exception as e:
+        if ws_logs: log_event(ws_logs, f"Google Books Error: {e}", "WARN")
+
+    # 2. OpenLibrary Fallback (Wenn Google nichts liefert)
     if not c:
         try:
             r = requests.get(f"https://openlibrary.org/search.json?q={titel} {autor}&limit=1").json()
             if r["docs"]: 
                 doc = r["docs"][0]
-                c = f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-M.jpg"
+                c = f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg" # L für Large
                 if not y and "first_publish_year" in doc: y = str(doc["first_publish_year"])
         except: pass
+        
     return c, g, y
 
 # --- AI CORE ---
@@ -483,12 +532,11 @@ def main():
                     t, a = [x.strip() for x in inp.split(",", 1)]
                     fa = smart_author(a, authors)
                     with st.spinner("Speichere..."):
-                        c, g, y = fetch_meta(t, fa)
+                        c, g, y = fetch_smart_meta(t, fa, ws_logs)
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
                         del st.session_state.df_books
-                    
-                    # BALLONS SIND ZURÜCK!
+                        log_event(ws_logs, f"Buch hinzugefügt: {t}", "NEW_BOOK")
                     st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
@@ -521,17 +569,16 @@ def main():
                             b1, b2 = st.columns([3, 1])
                             if b1.button("ℹ️ Info", key=f"k_{idx}", use_container_width=True): show_book_details(row, ws_books, ws_authors)
                             
-                            # REFRESH BUTTON FIX
+                            # REFRESH BUTTON
                             if b2.button("🔄", key=f"r_{idx}", help="Cover neu suchen"):
                                 with st.spinner("Suche Cover..."):
-                                    c_new, _, _ = fetch_meta(row["Titel"], row["Autor"])
+                                    c_new, _, _ = fetch_smart_meta(row["Titel"], row["Autor"], ws_logs)
                                     if c_new:
                                         try:
-                                            # Robuste Suche
                                             cell = ws_books.find(row["Titel"])
                                             headers = [str(h).lower() for h in ws_books.row_values(1)]
                                             try: c_col = headers.index("cover") + 1
-                                            except: c_col = 5 # Fallback Position 5
+                                            except: c_col = 5
                                             
                                             ws_books.update_cell(cell.row, c_col, c_new)
                                             log_event(ws_logs, f"Cover Update: {row['Titel']}", "UPDATE")
@@ -570,7 +617,7 @@ def main():
                 if st.form_submit_button("Hinzufügen"):
                     if "," in iw:
                         t, a = [x.strip() for x in iw.split(",", 1)]
-                        c, g, y = fetch_meta(t, a)
+                        c, g, y = fetch_smart_meta(t, a, ws_logs)
                         ws_books.append_row([t, a, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", "", y or "", "", ""])
                         del st.session_state.df_books; st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
         
