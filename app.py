@@ -52,7 +52,7 @@ def setup_sheets(client):
     
     ws_books = sh.sheet1
     try: ws_logs = sh.worksheet("Logs")
-    except: ws_logs = sh.add_worksheet(title="Logs", rows=1000, cols=3); ws_logs.append_row(["Zeitstempel", "Typ", "Nachricht"])
+    except: ws_logs = sh.add_worksheet(title="Logs", rows=2000, cols=3); ws_logs.append_row(["Zeitstempel", "Typ", "Nachricht"])
     try: ws_authors = sh.worksheet("Autoren")
     except: ws_authors = sh.add_worksheet(title="Autoren", rows=1000, cols=1); ws_authors.update_cell(1, 1, "Name")
     
@@ -60,12 +60,26 @@ def setup_sheets(client):
 
 def log_to_sheet(ws_logs, message, msg_type="INFO"):
     """
-    Schreibt Log zwingend ganz oben (Zeile 2) ins Sheet.
-    Kein try-except mehr, damit wir Fehler sehen!
+    Schreibt Logs oben in Zeile 2 (Rolling Window).
+    Löscht alte Zeilen, wenn > 2000.
     """
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # insert_row schiebt alles nach unten -> Log ist immer oben sichtbar
-    ws_logs.insert_row([ts, msg_type, str(message)], index=2)
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 1. Neue Zeile OBEN einfügen (Index 2, da 1 die Header ist)
+        ws_logs.insert_row([ts, msg_type, str(message)], index=2)
+        
+        # 2. Cleanup: Wenn Sheet zu lang, unten kürzen (nur alle paar mal prüfen um API zu sparen wäre besser, aber wir machen es sicher)
+        # Wir machen es simple: Wir nehmen an, dass es wächst.
+        # Um Quota zu sparen, prüfen wir die Länge nicht jedes Mal per API call, sondern löschen einfach blind Zeile 2001 falls sie existiert?
+        # Nein, sauberer ist: row_count checken.
+        if ws_logs.row_count > 2000:
+             # Lösche die letzte Zeile
+             ws_logs.delete_rows(ws_logs.row_count)
+             
+    except Exception as e:
+        # Nur in die Konsole, um die App nicht zu stören
+        print(f"Log Error: {e}")
 
 def check_structure(ws):
     try:
@@ -132,7 +146,7 @@ def update_full_dataframe(ws, new_df):
         except: pass
     return True
 
-# --- API HELPERS ---
+# --- API HELPERS (COVER SEARCH - LOCKER) ---
 def process_genre(raw):
     if not raw: return "Roman"
     try: t = GoogleTranslator(source='auto', target='de').translate(raw); return "Roman" if "römisch" in t.lower() else t
@@ -313,7 +327,7 @@ def open_cover_gallery(book, ws_books, ws_logs):
                         st.rerun()
                     except Exception as e:
                         st.error(f"Fehler: {e}")
-                        # Kein st.error mehr im logger, da wir den Fehler schon hier sehen
+                        log_to_sheet(ws_logs, f"Cover Save Error: {e}", "ERROR")
     else:
         st.warning("Keine passenden Bilder gefunden.")
         if st.button("Abbrechen"): st.rerun()
@@ -418,6 +432,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 st.success("Gespeichert!"); st.balloons(); time.sleep(1); st.rerun()
             except Exception as e:
                 st.error(f"Fehler: {e}")
+                log_to_sheet(ws_logs, f"Save Error: {e}", "ERROR")
 
         st.markdown("---")
         if st.button("🗑️ Löschen"):
@@ -429,6 +444,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
 def main():
     st.title("📚 Meine Bibliothek")
     
+    # Cleanup beim Start
     if "gallery_images" in st.session_state: del st.session_state.gallery_images
     
     client = get_connection()
@@ -450,14 +466,19 @@ def main():
     
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
+        
+        # --- DER LINK ---
         st.markdown(f"🔗 [**📂 Öffne verknüpfte Tabelle**](https://docs.google.com/spreadsheets/d/{sh.id})")
+        
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
         
         # TEST BUTTON FÜR LOGS
         if st.button("🛠️ Schreibtest (Zelle C1)"):
             try:
+                # Schreib direkt in Zelle C1 (Zeile 1, Spalte 3)
                 ws_logs.update_cell(1, 3, "TEST_OK")
+                log_to_sheet(ws_logs, "Manueller Test-Log", "DEBUG")
                 st.success("Erfolg! Prüfe Zelle C1 im Logs-Tab.")
             except Exception as e:
                 st.error(f"Fehler beim Schreiben: {e}")
@@ -542,9 +563,9 @@ def main():
             try:
                 logs = ws_logs.get_all_values()
                 if len(logs) > 1:
-                    last_logs = logs[-10:]
+                    last_logs = logs[:10] # Zeige die obersten 10 (da wir insert_row nutzen)
                     txt = ""
-                    for l in reversed(last_logs): txt += f"{l[0]} | {l[2]}\n"
+                    for l in last_logs: txt += f"{l[0]} | {l[2]}\n"
                     st.code(txt)
             except: st.write("Keine Logs")
 
