@@ -171,7 +171,11 @@ def update_full_dataframe(ws, new_df):
     force_reload()
     return True
 
-def filter_and_sort_books(df, query, sort_by):
+def filter_and_sort_books(df_in, query, sort_by):
+    # WICHTIG: Echte Kopie erstellen, damit wir das Original nicht ändern und Sortierung sauber ist
+    df = df_in.copy()
+    
+    # 1. Filtern
     if query:
         q = query.lower()
         mask = (
@@ -180,11 +184,15 @@ def filter_and_sort_books(df, query, sort_by):
             df['Tags'].str.lower().str.contains(q, na=False)
         )
         df = df[mask]
+    
+    # 2. Sortieren
     if sort_by == "Autor (A-Z)":
-        df['Lastname'] = df['Autor'].apply(lambda x: x.split(' ')[-1] if x and ' ' in x else x)
-        df = df.sort_values(by='Lastname', key=lambda col: col.str.lower())
+        # Erstelle temporäre Spalte für Nachnamen
+        df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x and str(x).strip() else "")
+        df = df.sort_values(by='sort_key', key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
+        
     return df
 
 # --- API HELPERS ---
@@ -387,8 +395,10 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 ws_books.update_cell(cell.row, col_y, new_year)
                 ws_books.update_cell(cell.row, col_teaser, new_teaser)
                 ws_books.update_cell(cell.row, col_bio, new_bio)
+                
                 auto_cleanup_authors(ws_books)
                 force_reload()
+                
                 if "selected_inline_cover" in st.session_state: del st.session_state.selected_inline_cover
                 log_to_sheet(ws_logs, f"Update: {new_title}", "SAVE")
                 st.success("Gespeichert!"); st.balloons(); time.sleep(1); st.rerun()
@@ -424,9 +434,19 @@ def main():
                 if "gemini_api_key" in st.secrets: st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
                 else: st.session_state.available_models_list = []
         models = st.session_state.available_models_list
+        
+        # GEMMA 3 27B PRIORITÄT
         default_idx = 0
-        for i, m in enumerate(models):
-            if "gemma" in m: default_idx = i; break
+        search_prio = ["gemma-3-27b", "gemma-3"] 
+        found = False
+        for prio in search_prio:
+            for i, m in enumerate(models):
+                if prio in m:
+                    default_idx = i
+                    found = True
+                    break
+            if found: break
+            
         selected_model = st.selectbox("🧠 KI-Modell", models, index=default_idx if models else None)
         pause_time = 1.0 if (selected_model and "gemma" in selected_model) else 8.0
         
@@ -578,6 +598,7 @@ def main():
                                 try: s_val = int(row['Bewertung'])
                                 except: s_val = 0
                                 if s_val > 0: st.markdown(f"<span style='color:#d35400'>{'★'*s_val}</span>", unsafe_allow_html=True)
+                            
                             teaser_text = row.get("Teaser", "")
                             if teaser_text and len(str(teaser_text)) > 5:
                                 short_teaser = str(teaser_text)[:200] + "..." if len(str(teaser_text)) > 200 else str(teaser_text)
@@ -643,7 +664,20 @@ def main():
             auth_stats = df_r["Autor"].value_counts().reset_index()
             auth_stats.columns = ["Autor", "Anzahl"]
             auth_stats = auth_stats.sort_values(by=["Anzahl", "Autor"], ascending=[False, True])
-            st.dataframe(auth_stats, use_container_width=True, hide_index=True, column_config={"Autor": st.column_config.TextColumn("Autor"), "Anzahl": st.column_config.ProgressColumn("Gelesen", format="%d", min_value=0, max_value=int(auth_stats["Anzahl"].max()))})
+            st.dataframe(
+                auth_stats, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "Autor": st.column_config.TextColumn("Autor"),
+                    "Anzahl": st.column_config.ProgressColumn(
+                        "Gelesen", 
+                        format="%d", 
+                        min_value=0, 
+                        max_value=int(auth_stats["Anzahl"].max())
+                    )
+                }
+            )
 
 if __name__ == "__main__":
     main()
