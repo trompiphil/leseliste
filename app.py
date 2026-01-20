@@ -28,16 +28,18 @@ st.markdown("""
     .stButton button:hover { background-color: #e67e22 !important; }
     [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
     .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
+    
+    /* Navigation */
     div[role="radiogroup"] { display: flex; flex-direction: row; justify-content: center; gap: 10px; width: 100%; }
     div[role="radiogroup"] label { background-color: #eaddcf; padding: 10px 20px; border-radius: 8px; border: 1px solid #d35400; cursor: pointer; font-weight: bold; color: #4a3b2a !important; }
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
     
-    /* Kleine Anpassung für Sortier-Optionen */
-    .view-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+    /* Teaser Text in Kachel */
+    .tile-teaser { font-size: 0.9em; color: #555; margin-top: 5px; font-style: italic; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- BACKEND ---
+# --- BACKEND (CACHED) ---
 @st.cache_resource
 def get_connection():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -145,10 +147,8 @@ def update_full_dataframe(ws, new_df):
 
 # --- HELPER: SEARCH & SORT ---
 def filter_and_sort_books(df, query, sort_by):
-    # 1. SUCHE (Titel + Autor + Tags)
     if query:
         q = query.lower()
-        # Wir bauen eine Maske: True wenn Titel ODER Autor ODER Tags den Suchbegriff enthalten
         mask = (
             df['Titel'].str.lower().str.contains(q, na=False) |
             df['Autor'].str.lower().str.contains(q, na=False) |
@@ -156,14 +156,11 @@ def filter_and_sort_books(df, query, sort_by):
         )
         df = df[mask]
     
-    # 2. SORTIERUNG
     if sort_by == "Autor (A-Z)":
-        # Helper Spalte für Nachnamen
         df['Lastname'] = df['Autor'].apply(lambda x: x.split(' ')[-1] if x and ' ' in x else x)
         df = df.sort_values(by='Lastname', key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
-    
     return df
 
 # --- API HELPERS ---
@@ -263,13 +260,10 @@ def fetch_all_ai_data_manual(titel, autor, model_name):
     except: return None, "JSON Fehler"
 
 def cleanup_author_duplicates_batch(ws_books, ws_authors):
-    # (Logik für Autor-Bereinigung)
-    # ... Vereinfachte Logik für Performance ...
     pass 
 
 def smart_author(short, known):
     s = short.strip().lower()
-    # Sortiere bekannte Autoren nach Länge (längste zuerst), damit "Naomi Novik" vor "Novik" kommt falls beide da sind
     for k in sorted(known, key=len, reverse=True):
         if s in str(k).lower(): return k
     return short
@@ -367,7 +361,6 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 except: col_teaser = len(headers) + 3
                 try: col_bio = headers.index("bio") + 1
                 except: col_bio = len(headers) + 4
-                
                 ws_books.update_cell(cell.row, col_t, new_title)
                 ws_books.update_cell(cell.row, col_a, new_author)
                 ws_books.update_cell(cell.row, col_c, final_cover)
@@ -375,7 +368,6 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 ws_books.update_cell(cell.row, col_y, new_year)
                 ws_books.update_cell(cell.row, col_teaser, new_teaser)
                 ws_books.update_cell(cell.row, col_bio, new_bio)
-                
                 force_reload()
                 if "selected_inline_cover" in st.session_state: del st.session_state.selected_inline_cover
                 log_to_sheet(ws_logs, f"Update: {new_title}", "SAVE")
@@ -402,6 +394,12 @@ def main():
         st.write("🔧 **Einstellungen**")
         st.markdown(f"🔗 [**📂 Tabelle öffnen**](https://docs.google.com/spreadsheets/d/{sh.id})")
         if st.button("🔄 Cache leeren"): force_reload(); st.rerun()
+        if st.button("🛠️ Schreibtest"):
+            try:
+                ws_logs.update_cell(1, 3, "TEST_OK")
+                log_to_sheet(ws_logs, "Manueller Test-Log", "DEBUG")
+                st.success("Erfolg!")
+            except Exception as e: st.error(f"Fehler: {e}")
         
         st.markdown("---")
         if "available_models_list" not in st.session_state:
@@ -409,17 +407,15 @@ def main():
                 if "gemini_api_key" in st.secrets:
                     st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
                 else: st.session_state.available_models_list = []
-        
         models = st.session_state.available_models_list
         default_idx = 0
         for i, m in enumerate(models):
             if "gemma" in m: default_idx = i; break
-        
-        selected_model = st.selectbox("🧠 KI-Modell wählen", models, index=default_idx if models else None)
+        selected_model = st.selectbox("🧠 KI-Modell", models, index=default_idx if models else None)
         pause_time = 1.0 if (selected_model and "gemma" in selected_model) else 8.0
         
         st.markdown("---")
-        st.write("🤖 **KI-Update (Manuell)**")
+        st.write("🤖 **KI-Update**")
         missing_count = 0
         missing_indices = []
         if not df.empty:
@@ -430,16 +426,14 @@ def main():
         
         if missing_count > 0:
             st.info(f"{missing_count} Bücher offen.")
-            if st.button("✨ Fehlende Infos laden"):
+            if st.button("✨ Infos laden"):
                 if not selected_model: st.error("Kein Modell!"); st.stop()
                 with st.status(f"Starte mit {selected_model}...", expanded=True) as status:
                     prog_bar = status.progress(0)
                     headers = [str(h).lower() for h in ws_books.row_values(1)]
                     try:
-                        c_tag = headers.index("tags") + 1
-                        c_year = headers.index("erschienen") + 1
-                        c_teaser = headers.index("teaser") + 1
-                        c_bio = headers.index("bio") + 1
+                        c_tag, c_year = headers.index("tags") + 1, headers.index("erschienen") + 1
+                        c_teaser, c_bio = headers.index("teaser") + 1, headers.index("bio") + 1
                     except: st.error("Spaltenfehler"); st.stop()
                     
                     done = 0
@@ -447,13 +441,11 @@ def main():
                         row = df.loc[idx]
                         status.write(f"Bearbeite: **{row['Titel']}**...")
                         log_to_sheet(ws_logs, f"Auto-Update: {row['Titel']}", "AI_JOB")
-                        
                         ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
                         if err == "RATE_LIMIT":
-                            status.write("⏳ Rate Limit! Warte 60s...")
+                            status.write("⏳ Limit! Warte 60s...")
                             time.sleep(60)
                             ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
-                        
                         if ai_data:
                             try:
                                 cell = ws_books.find(row["Titel"])
@@ -461,8 +453,8 @@ def main():
                                 if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
                                 if ai_data.get("teaser"): ws_books.update_cell(cell.row, c_teaser, ai_data["teaser"])
                                 if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data["bio"])
-                            except: pass
-                        
+                                log_to_sheet(ws_logs, f"KI Daten gespeichert: {row['Titel']}", "SUCCESS")
+                            except Exception as e: log_to_sheet(ws_logs, f"Sheet Error: {e}", "ERROR")
                         done += 1
                         prog_bar.progress(done / missing_count)
                         time.sleep(pause_time)
@@ -470,6 +462,16 @@ def main():
                     status.update(label="Fertig!", state="complete", expanded=False)
                     time.sleep(1); st.rerun()
         else: st.success("Alles aktuell.")
+            
+        with st.expander("📜 System-Log", expanded=False):
+            try:
+                logs = ws_logs.get_all_values()
+                if len(logs) > 1:
+                    last_logs = logs[:10]
+                    txt = ""
+                    for l in last_logs: txt += f"{l[0]} | {l[2]}\n"
+                    st.code(txt)
+            except: st.write("Keine Logs")
 
     st.write("")
     nav = st.radio("Navigation", NAV_OPTIONS, 
@@ -513,7 +515,6 @@ def main():
         
         view_mode = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed", key=f"v_{is_wishlist}")
         
-        # Filter & Sort
         df_filtered = filter_and_sort_books(dataset, q, sort_by)
         
         if df_filtered.empty:
@@ -521,29 +522,13 @@ def main():
             return
 
         if view_mode == "Liste":
-            # Data Editor für Liste
             cols_show = ["Titel", "Autor", "Notiz"]
             if not is_wishlist: cols_show.insert(2, "Bewertung")
-            
-            # Index resetten für sauberen Editor
             df_display = df_filtered[cols_show].copy()
             df_display.insert(0, "Info", False)
-            
-            edited = st.data_editor(
-                df_display, 
-                column_config={
-                    "Info": st.column_config.CheckboxColumn("Info", width="small"),
-                    "Titel": st.column_config.TextColumn(disabled=True),
-                    "Autor": st.column_config.TextColumn(disabled=True),
-                    "Bewertung": st.column_config.NumberColumn("⭐", min_value=0, max_value=5)
-                }, 
-                hide_index=True, use_container_width=True, key=f"ed_{is_wishlist}"
-            )
-            
-            # Check selection
+            edited = st.data_editor(df_display, column_config={"Info": st.column_config.CheckboxColumn("Info", width="small"), "Titel": st.column_config.TextColumn(disabled=True), "Autor": st.column_config.TextColumn(disabled=True), "Bewertung": st.column_config.NumberColumn("⭐", min_value=0, max_value=5)}, hide_index=True, use_container_width=True, key=f"ed_{is_wishlist}")
             if edited["Info"].any():
                 sel_idx = edited[edited["Info"]].index[0]
-                # Map back to original DF row using index or title
                 orig_title = df_display.iloc[sel_idx]["Titel"]
                 orig_row = df[df["Titel"] == orig_title].iloc[0]
                 show_book_details(orig_row, ws_books, ws_authors, ws_logs)
@@ -553,14 +538,17 @@ def main():
             for i, (idx, row) in enumerate(df_filtered.iterrows()):
                 with cols[i % 3]:
                     with st.container(border=True):
-                        c_img, c_info = st.columns([1, 2])
+                        c_img, c_content = st.columns([1, 2])
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                            if st.button("ℹ️", key=f"inf_{idx}_{is_wishlist}"): 
+                            # Buttons nebeneinander unter dem Bild
+                            b1, b2 = st.columns([4, 1])
+                            if b1.button("ℹ️ Info", key=f"inf_{idx}_{is_wishlist}", use_container_width=True): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
-                            if st.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover ändern"):
+                            if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover"):
                                 open_cover_gallery(row, ws_books, ws_logs)
-                        with c_info:
+                        
+                        with c_content:
                             st.write(f"**{row['Titel']}**")
                             st.caption(f"{row['Autor']}")
                             if not is_wishlist:
@@ -568,7 +556,14 @@ def main():
                                 except: s_val = 0
                                 if s_val > 0: st.markdown(f"<span style='color:#d35400'>{'★'*s_val}</span>", unsafe_allow_html=True)
                             
-                            # Gelesen Button für Wishlist
+                            # TEASER ANZEIGEN
+                            teaser_text = row.get("Teaser", "")
+                            if teaser_text and len(str(teaser_text)) > 5:
+                                short_teaser = str(teaser_text)[:200] + "..." if len(str(teaser_text)) > 200 else str(teaser_text)
+                                st.markdown(f"<div class='tile-teaser'>{short_teaser}</div>", unsafe_allow_html=True)
+                            else:
+                                st.caption("Noch kein Teaser.")
+
                             if is_wishlist:
                                 if st.button("✅ Gelesen", key=f"read_{idx}"):
                                     cell = ws_books.find(row["Titel"])
@@ -589,13 +584,11 @@ def main():
                 if st.form_submit_button("Hinzufügen"):
                     if "," in iw:
                         t, a = [x.strip() for x in iw.split(",", 1)]
-                        # AUTO-CORRECT AUTHOR
                         fa = smart_author(a, authors)
                         c, g, y = fetch_meta_single(t, fa)
                         ws_books.append_row([t, fa, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", "", y or "", "", ""])
                         force_reload()
                         log_to_sheet(ws_logs, f"Wunsch: {t}", "WISH"); st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
-        
         df_w = df[df["Status"] == "Wunschliste"].copy()
         if not df_w.empty:
             render_library_view(df_w, is_wishlist=True)
@@ -610,25 +603,23 @@ def main():
             c2.metric("Top Autor", df_r["Autor"].mode()[0] if not df_r.empty else "-")
             st.markdown("---")
             
-            # TOP 3 GENRES / TAGS
             all_tags = []
             if "Tags" in df_r.columns:
                 for t in df_r["Tags"].dropna():
-                    # Split by comma and strip whitespace
                     tags = [x.strip() for x in str(t).split(",") if x.strip()]
                     all_tags.extend(tags)
             
             if all_tags:
-                st.subheader("🏆 Top 3 Genres/Themen")
+                st.subheader("🏆 Top 3 Themen")
                 tag_counts = pd.Series(all_tags).value_counts().head(3)
                 
-                # Als einfaches Balkendiagramm
-                st.bar_chart(tag_counts, color="#d35400")
-                
-                # Oder als Tabelle
-                # st.table(tag_counts)
-            else:
-                st.info("Noch keine Tags verfügbar (KI-Update starten!)")
+                c_top = st.columns(3)
+                for i, (tag, count) in enumerate(tag_counts.items()):
+                    c_top[i].metric(label=f"Platz {i+1}", value=tag, delta=f"{count} Bücher")
+            
+            st.markdown("---")
+            with st.expander("👥 Alle Autoren (Datenbank)"):
+                st.write(", ".join(sorted(authors)))
 
 if __name__ == "__main__":
     main()
