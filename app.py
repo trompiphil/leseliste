@@ -25,6 +25,7 @@ st.markdown("""
     [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
     .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
     .book-tag { display: inline-block; background-color: #d35400; color: white !important; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-right: 5px; margin-bottom: 5px; font-weight: bold; }
+    .log-box { font-family: monospace; font-size: 0.8em; background-color: #333; color: #0f0; padding: 10px; border-radius: 5px; max-height: 300px; overflow-y: scroll; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -34,8 +35,7 @@ def get_connection():
     if "gcp_service_account" in st.secrets:
         try:
             creds_dict = dict(st.secrets["gcp_service_account"])
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            if "private_key" in creds_dict: creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             return gspread.authorize(creds)
         except Exception: return None
@@ -45,9 +45,23 @@ def setup_sheets(client):
     try: sh = client.open("Bücherliste") 
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
     ws_books = sh.sheet1
+    
+    # LOG SHEET ERSTELLEN ODER HOLEN
+    try: ws_logs = sh.worksheet("Logs")
+    except: 
+        ws_logs = sh.add_worksheet(title="Logs", rows=1000, cols=3)
+        ws_logs.append_row(["Zeitstempel", "Typ", "Nachricht"])
+        
     try: ws_authors = sh.worksheet("Autoren")
     except: ws_authors = sh.add_worksheet(title="Autoren", rows=1000, cols=1); ws_authors.update_cell(1, 1, "Name")
-    return ws_books, ws_authors
+    return ws_books, ws_logs, ws_authors
+
+def log_event(ws_logs, message, msg_type="INFO"):
+    """Schreibt ins Log-Sheet"""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ws_logs.append_row([ts, msg_type, str(message)])
+    except: pass
 
 def check_structure(ws):
     try:
@@ -83,22 +97,6 @@ def get_data(ws):
             if d["Titel"]: data.append(d)
         return pd.DataFrame(data)
     except: return pd.DataFrame(columns=cols)
-
-def update_single_entry(ws, titel, field, value):
-    try:
-        cell = ws.find(titel)
-        headers = [str(h).lower() for h in ws.row_values(1)]
-        col = headers.index(field.lower()) + 1
-        ws.update_cell(cell.row, col, value)
-        return True
-    except: return False
-
-def delete_book(ws, titel):
-    try:
-        cell = ws.find(titel)
-        ws.delete_rows(cell.row)
-        return True
-    except: return False
 
 def update_full_dataframe(ws, new_df):
     current_data = ws.get_all_values()
@@ -142,12 +140,9 @@ def fetch_meta(titel, autor):
 
 # --- ROBUSTER KI CORE ---
 def clean_json_string(text):
-    """Extrahiert sauberes JSON aus Text, egal was die KI drumherum labert."""
     try:
-        # Suche nach dem ersten { und dem letzten }
         match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return match.group(0)
+        if match: return match.group(0)
         return text
     except: return text
 
@@ -179,30 +174,37 @@ def call_gemini(prompt, model_name):
                 res = response.json()
                 txt = res['candidates'][0]['content']['parts'][0]['text']
                 return clean_json_string(txt), None
-            except: return None, "Parse Fehler"
+            except: return None, f"Parse Fehler. Raw: {response.text}"
         elif response.status_code == 429: return None, "Rate Limit"
-        else: return None, f"Fehler {response.status_code}"
+        else: return None, f"HTTP Fehler {response.status_code}: {response.text}"
     except Exception as e: return None, str(e)
 
-def fetch_all_ai_data(titel, autor, model_name):
+def fetch_all_ai_data_debug(titel, autor, model_name, ws_logs):
     prompt = f"""
     Buch: "{titel}" von {autor}.
-    Erstelle ein valides JSON Objekt (kein Markdown) mit diesen 4 Feldern auf Deutsch:
-    "tags": "3-5 kurze Tags",
-    "year": "YYYY",
-    "teaser": "Spannender Teaser (max 60 Worte)",
-    "bio": "Kurze Autor Info (max 30 Worte)"
+    Erstelle ein JSON mit genau diesen Keys: "tags", "year", "teaser" (max 60 Worte), "bio" (max 30 Worte).
+    Antworte NUR mit dem JSON String. Keine Markdown Formatierung.
     """
     txt, err = call_gemini(prompt, model_name)
-    if not txt: return {}
-    try: return json.loads(txt)
-    except: return {}
+    
+    if err:
+        log_event(ws_logs, f"KI Fehler bei '{titel}': {err}", "ERROR")
+        return {}
+    
+    # Logge den rohen Text zur Diagnose
+    log_event(ws_logs, f"KI Raw Antwort für '{titel}': {txt[:50]}...", "DEBUG")
+    
+    try: 
+        data = json.loads(txt)
+        return data
+    except Exception as e: 
+        log_event(ws_logs, f"JSON Parse Error bei '{titel}': {str(e)} | Raw: {txt}", "ERROR")
+        return {}
 
 # --- BACKGROUND WORKER (DER HELD) ---
 def background_worker_process(missing_books_data, creds_dict):
-    """Dieser Prozess läuft im Hintergrund und blockiert die App NICHT."""
     try:
-        # Eigene Verbindung aufbauen (Thread-safe)
+        # Verbindung aufbauen
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         if "private_key" in creds_dict: creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
@@ -210,43 +212,48 @@ def background_worker_process(missing_books_data, creds_dict):
         sh = client.open("Bücherliste")
         ws = sh.sheet1
         
-        # Modell finden (hier lokal prüfen, da wir keinen Session State haben)
-        api_key = st.secrets["gemini_api_key"]
-        # Wir machen einen simplen Check oder nehmen hardcoded Flash 1.5 wenn wir sicher sind
-        # Da wir im Thread sind, machen wir es einfach und nutzen Flash 1.5 oder 2.0 wenn verfügbar
-        model_name = "gemini-1.5-flash" # Fallback, meistens sicher
+        # Log Sheet
+        try: ws_logs = sh.worksheet("Logs")
+        except: ws_logs = sh.add_worksheet("Logs", 1000, 3)
         
-        # Spaltenindizes finden
+        log_event(ws_logs, "Hintergrund-Prozess gestartet.", "START")
+        
+        # Modell finden
+        api_key = st.secrets["gemini_api_key"]
+        # Harte Suche im Thread, um sicherzugehen
+        valid_models = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-exp"]
+        model_name = "gemini-1.5-flash" # Default
+        
         headers = [str(h).lower() for h in ws.row_values(1)]
-        try:
-            c_tag = headers.index("tags") + 1
-            c_year = headers.index("erschienen") + 1
-            c_teaser = headers.index("teaser") + 1
-            c_bio = headers.index("bio") + 1
-        except: return # Struktur stimmt nicht
+        c_tag = headers.index("tags") + 1
+        c_year = headers.index("erschienen") + 1
+        c_teaser = headers.index("teaser") + 1
+        c_bio = headers.index("bio") + 1
 
         for book in missing_books_data:
-            # Sicherheits-Pause für Rate Limit (sehr konservativ)
-            time.sleep(10)
-            
+            time.sleep(8) # Solide Pause
             titel = book['Titel']
-            autor = book['Autor']
+            log_event(ws_logs, f"Bearbeite: {titel}", "INFO")
             
-            # KI Fragen
-            ai_data = fetch_all_ai_data(titel, autor, model_name)
+            ai_data = fetch_all_ai_data_debug(titel, book['Autor'], model_name, ws_logs)
             
             if ai_data:
                 try:
                     cell = ws.find(titel)
-                    # Schreiben
-                    if ai_data.get("tags") and not book['Tags']: ws.update_cell(cell.row, c_tag, ai_data["tags"])
-                    if ai_data.get("year") and not book['Erschienen']: ws.update_cell(cell.row, c_year, ai_data["year"])
-                    if ai_data.get("teaser") and not book['Teaser']: ws.update_cell(cell.row, c_teaser, ai_data["teaser"])
-                    if ai_data.get("bio") and not book['Bio']: ws.update_cell(cell.row, c_bio, ai_data["bio"])
-                except: pass
+                    if ai_data.get("tags"): ws.update_cell(cell.row, c_tag, ai_data["tags"])
+                    if ai_data.get("year"): ws.update_cell(cell.row, c_year, ai_data["year"])
+                    if ai_data.get("teaser"): ws.update_cell(cell.row, c_teaser, ai_data["teaser"])
+                    if ai_data.get("bio"): ws.update_cell(cell.row, c_bio, ai_data["bio"])
+                    log_event(ws_logs, f"Gespeichert: {titel}", "SUCCESS")
+                except Exception as e:
+                    log_event(ws_logs, f"Sheet Fehler: {str(e)}", "ERROR")
+            else:
+                log_event(ws_logs, f"Keine Daten für {titel}", "WARN")
+                
+        log_event(ws_logs, "Hintergrund-Prozess fertig.", "END")
                 
     except Exception as e:
-        print(f"Background Error: {e}")
+        print(f"Background Crash: {e}")
 
 # --- HELPERS ---
 def smart_author(short, known):
@@ -320,7 +327,6 @@ def show_book_details(book, ws_books, ws_authors):
                     tag_html += f'<span class="book-tag">{t.strip()}</span>'
                 st.markdown(tag_html, unsafe_allow_html=True)
         with col2:
-            # Nur lesen
             teaser = book.get("Teaser", "")
             bio = book.get("Bio", "")
             if not teaser or len(str(teaser)) < 5: teaser_disp = "<i>(Wird im Hintergrund geladen...)</i>"
@@ -379,13 +385,20 @@ def show_book_details(book, ws_books, ws_authors):
                 del st.session_state.df_books
                 st.success("Gelöscht!"); time.sleep(1); st.rerun()
 
+def delete_book(ws, titel):
+    try:
+        cell = ws.find(titel)
+        ws.delete_rows(cell.row)
+        return True
+    except: return False
+
 # --- MAIN ---
 def main():
     st.title("📚 Meine Bibliothek")
     
     client = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
-    ws_books, ws_authors = setup_sheets(client)
+    ws_books, ws_logs, ws_authors = setup_sheets(client)
     
     if "checked" not in st.session_state: check_structure(ws_books); st.session_state.checked=True
     if "df_books" not in st.session_state: 
@@ -401,34 +414,39 @@ def main():
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
     # --- BACKGROUND CHECK ---
-    # Startet den Thread NUR einmal pro Session
     if "bg_task_started" not in st.session_state:
-        # Finde Lücken
         missing_books = []
         if not df.empty:
             for i, r in df.iterrows():
-                if len(str(r.get("Teaser", ""))) < 5 or len(str(r.get("Tags", ""))) < 2:
-                    # Wir geben die Rohteile (Dict) weiter, damit Pandas nicht zickt
+                if len(str(r.get("Teaser", ""))) < 5:
                     missing_books.append(r.to_dict())
         
         if missing_books:
-            # STARTE THREAD
             creds = dict(st.secrets["gcp_service_account"])
             t = threading.Thread(target=background_worker_process, args=(missing_books, creds))
             t.start()
             st.session_state.bg_task_started = True
-            st.sidebar.info(f"🚀 Hintergrund-Dienst gestartet ({len(missing_books)} Bücher)")
         else:
-            st.session_state.bg_task_started = True # Auch wenn nix zu tun ist, markieren als erledigt
+            st.session_state.bg_task_started = True
 
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
         
-        if "bg_task_started" in st.session_state and st.session_state.bg_task_started:
-             # Einfacher Hinweis, keine blockierende Aktion
-             pass
+        st.markdown("---")
+        st.write("📜 **System-Log (Live)**")
+        # ZEIGE LETZTE 5 LOGS
+        try:
+            logs = ws_logs.get_all_values()
+            if len(logs) > 1:
+                last_logs = logs[-5:] # Letzte 5
+                log_text = ""
+                for l in reversed(last_logs): # Neueste zuerst
+                    log_text += f"[{l[0].split(' ')[1]}] {l[2]}\n"
+                st.markdown(f"<div class='log-box'>{log_text}</div>", unsafe_allow_html=True)
+            else: st.info("Keine Logs.")
+        except: st.warning("Log-Fehler")
 
     tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"])
     
@@ -445,13 +463,12 @@ def main():
                     val = (rate + 1) if rate is not None else 0
                     t, a = [x.strip() for x in inp.split(",", 1)]
                     fa = smart_author(a, authors)
-                    with st.spinner("Speichere... (KI läuft im Hintergrund)"):
+                    with st.spinner("Speichere..."):
                         c, g, y = fetch_meta(t, fa)
-                        # Wir speichern es leer, der Background Worker holt den Rest beim nächsten Reload oder Thread lauf
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
                         del st.session_state.df_books
-                    st.success(f"Gespeichert: {t}"); time.sleep(1.0); st.rerun()
+                    st.success(f"Gespeichert: {t} (KI läuft im Hintergrund)"); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
     with tab_sammlung:
