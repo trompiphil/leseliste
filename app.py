@@ -47,7 +47,6 @@ def get_connection():
     return None
 
 def setup_sheets(client):
-    # Wir geben jetzt auch das Spreadsheet-Objekt 'sh' zurück, um die ID/URL zu bekommen
     try: sh = client.open("Bücherliste") 
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
     
@@ -60,12 +59,13 @@ def setup_sheets(client):
     return sh, ws_books, ws_logs, ws_authors
 
 def log_to_sheet(ws_logs, message, msg_type="INFO"):
-    """Schreibt Log zwingend ins Sheet"""
-    try:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ws_logs.append_row([ts, msg_type, str(message)])
-    except Exception as e:
-        st.error(f"LOGGING FEHLER: {e}")
+    """
+    Schreibt Log zwingend ganz oben (Zeile 2) ins Sheet.
+    Kein try-except mehr, damit wir Fehler sehen!
+    """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # insert_row schiebt alles nach unten -> Log ist immer oben sichtbar
+    ws_logs.insert_row([ts, msg_type, str(message)], index=2)
 
 def check_structure(ws):
     try:
@@ -132,7 +132,7 @@ def update_full_dataframe(ws, new_df):
         except: pass
     return True
 
-# --- API HELPERS (COVER SEARCH - LOCKER) ---
+# --- API HELPERS ---
 def process_genre(raw):
     if not raw: return "Roman"
     try: t = GoogleTranslator(source='auto', target='de').translate(raw); return "Roman" if "römisch" in t.lower() else t
@@ -313,7 +313,7 @@ def open_cover_gallery(book, ws_books, ws_logs):
                         st.rerun()
                     except Exception as e:
                         st.error(f"Fehler: {e}")
-                        log_to_sheet(ws_logs, f"Cover Save Error: {e}", "ERROR")
+                        # Kein st.error mehr im logger, da wir den Fehler schon hier sehen
     else:
         st.warning("Keine passenden Bilder gefunden.")
         if st.button("Abbrechen"): st.rerun()
@@ -358,7 +358,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
         current_cover = book.get("Cover", "")
         new_cover_url = st.text_input("Cover URL (manuell)", value=current_cover)
         
-        # GALERIE BUTTON HIER (übernimmt URL in das Textfeld, speichert aber erst unten)
+        # GALERIE BUTTON
         if st.button("🔍 Cover online suchen (Galerie)"):
             with st.spinner("Suche..."):
                 cands = fetch_cover_candidates_loose(book["Titel"], book["Autor"], ws_logs)
@@ -418,7 +418,6 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 st.success("Gespeichert!"); st.balloons(); time.sleep(1); st.rerun()
             except Exception as e:
                 st.error(f"Fehler: {e}")
-                log_to_sheet(ws_logs, f"Save Error: {e}", "ERROR")
 
         st.markdown("---")
         if st.button("🗑️ Löschen"):
@@ -430,12 +429,11 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
 def main():
     st.title("📚 Meine Bibliothek")
     
-    # Cleanup beim Start
     if "gallery_images" in st.session_state: del st.session_state.gallery_images
     
     client = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
-    sh, ws_books, ws_logs, ws_authors = setup_sheets(client) # sh wird jetzt zurückgegeben
+    sh, ws_books, ws_logs, ws_authors = setup_sheets(client)
     
     if "checked" not in st.session_state: check_structure(ws_books); st.session_state.checked=True
     if "df_books" not in st.session_state: 
@@ -452,17 +450,17 @@ def main():
     
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
-        
-        # --- DER LINK ---
         st.markdown(f"🔗 [**📂 Öffne verknüpfte Tabelle**](https://docs.google.com/spreadsheets/d/{sh.id})")
-        
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
         
         # TEST BUTTON FÜR LOGS
-        if st.button("🛠️ Verbindung testen"):
-            log_to_sheet(ws_logs, "Test Log Eintrag", "TEST")
-            st.success("Test-Log gesendet! Prüfe dein Sheet.")
+        if st.button("🛠️ Schreibtest (Zelle C1)"):
+            try:
+                ws_logs.update_cell(1, 3, "TEST_OK")
+                st.success("Erfolg! Prüfe Zelle C1 im Logs-Tab.")
+            except Exception as e:
+                st.error(f"Fehler beim Schreiben: {e}")
         
         st.markdown("---")
         
@@ -540,13 +538,13 @@ def main():
                     time.sleep(1); st.rerun()
         else: st.success("Alles aktuell.")
             
-        with st.expander("📜 System-Log (Live Vorschau)"):
+        with st.expander("📜 System-Log"):
             try:
                 logs = ws_logs.get_all_values()
                 if len(logs) > 1:
                     last_logs = logs[-10:]
                     txt = ""
-                    for l in reversed(last_logs): txt += f"{l[0][11:]} {l[2]}\n"
+                    for l in reversed(last_logs): txt += f"{l[0]} | {l[2]}\n"
                     st.code(txt)
             except: st.write("Keine Logs")
 
@@ -599,7 +597,6 @@ def main():
                         if b1.button("ℹ️ Info", key=f"k_{idx}", use_container_width=True): 
                             show_book_details(row, ws_books, ws_authors, ws_logs)
                         
-                        # DER NEUE DIRECT-GALLERY BUTTON (BLAU)
                         if b2.button("🔄", key=f"r_{idx}", help="Cover Galerie öffnen"):
                             open_cover_gallery(row, ws_books, ws_logs)
                         
