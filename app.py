@@ -227,9 +227,10 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- KEY DIAGNOSE ---
+# --- INTELLIGENTE MODELLSUCHE (MIT FILTER) ---
+@st.cache_data(show_spinner=False)
 def check_api_key_models():
-    """Prüft, was der Key wirklich darf."""
+    """Findet das beste Modell, vermeidet aber das limitierte 2.5"""
     if "gemini_api_key" not in st.secrets: return None, "Kein API Key in Secrets"
     
     api_key = st.secrets["gemini_api_key"]
@@ -239,29 +240,47 @@ def check_api_key_models():
         r = requests.get(url)
         if r.status_code == 200:
             data = r.json()
-            # Finde alle Modelle, die Text generieren können
             valid_models = []
             for m in data.get('models', []):
                 if 'generateContent' in m.get('supportedGenerationMethods', []):
-                    # Entferne 'models/' Präfix
                     name = m['name'].split('/')[-1]
                     valid_models.append(name)
             
             if not valid_models:
-                return None, "API Key gültig, aber KEINE Modelle verfügbar (Berechtigung fehlt?)"
+                return None, "Keine Modelle gefunden."
             
-            # Wähle das beste verfügbare
-            # 1.5 Flash > 1.5 Pro > 1.0 Pro
+            # --- PRIORITÄTS-LOGIK ---
+            # Wir suchen gezielt nach Modellen mit gutem Limit
+            priority_list = [
+                "gemini-1.5-flash",
+                "gemini-1.5-flash-8b",
+                "gemini-2.0-flash-exp",
+                "gemini-1.5-pro",
+                "gemini-1.0-pro"
+            ]
+            
             best_model = None
-            if "gemini-1.5-flash" in valid_models: best_model = "gemini-1.5-flash"
-            elif "gemini-1.5-pro" in valid_models: best_model = "gemini-1.5-pro"
-            elif "gemini-1.0-pro" in valid_models: best_model = "gemini-1.0-pro"
-            else: best_model = valid_models[0]
             
-            return best_model, None # Erfolg!
+            # 1. Prüfe Priority List
+            for p in priority_list:
+                if p in valid_models:
+                    best_model = p
+                    break
+            
+            # 2. Wenn nix gefunden, nimm IRGENDEINS, aber vermeide "2.5"
+            if not best_model:
+                for m in valid_models:
+                    if "2.5" not in m: # 2.5 vermeiden!
+                        best_model = m
+                        break
+            
+            # 3. Notfall: Nimm das allererste (auch wenn es 2.5 ist)
+            if not best_model: best_model = valid_models[0]
+            
+            return best_model, None
             
         else:
-            return None, f"Google Error {r.status_code}: {r.text}"
+            return None, f"Google Error {r.status_code}"
     except Exception as e:
         return None, f"Verbindungstest fehlgeschlagen: {str(e)}"
 
@@ -291,7 +310,7 @@ def call_gemini(prompt):
         elif response.status_code == 429:
             return None, "Rate Limit (429) - Bitte warten"
         else:
-            # Falls das Modell doch nicht geht (z.B. Region block), Session löschen und neu suchen
+            # Falls das Modell doch nicht geht (z.B. 404), Session löschen und neu suchen
             if "working_model" in st.session_state: del st.session_state.working_model
             return None, f"Fehler {response.status_code}"
     except Exception as e: return None, str(e)
@@ -319,7 +338,7 @@ def get_ai_book_info(titel, autor):
     Antworte im JSON Format: {{ "teaser": "...", "bio": "..." }}
     """
     raw_text, err = call_gemini(prompt)
-    if not raw_text: return {"teaser": f"KI Fehler: {err}", "bio": "-"}
+    if not raw_text: return {"teaser": f"Fehler: {err}", "bio": "-"}
     try: return json.loads(raw_text)
     except: return {"teaser": "Fehler beim Lesen", "bio": "-"}
 
@@ -358,7 +377,7 @@ def batch_enrich_books(ws, df):
         except: pass
         
         progress_bar.progress((count + 1) / total)
-        time.sleep(5.0) 
+        time.sleep(6.0) 
         
     status_text.success(f"Fertig! {count} Bücher aktualisiert.")
     time.sleep(2)
@@ -414,100 +433,6 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in sorted(list(final_authors))])
     return 1
 
-# --- DIALOG (MIT EDITIER-FUNKTION) ---
-@st.dialog("📖 Buch-Details")
-def show_book_details(book, ws_books, ws_authors):
-    d_tab1, d_tab2 = st.tabs(["ℹ️ Info", "✏️ Bearbeiten"])
-    
-    with d_tab1:
-        st.markdown(f"### {book['Titel']}")
-        
-        year_val = book.get('Erschienen')
-        year_str = f" ({year_val})" if year_val and str(year_val).strip() != "" else ""
-        st.markdown(f"**von {book['Autor']}{year_str}**")
-        
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            cov = book["Cover"] if book["Cover"] != "-" else "https://via.placeholder.com/200x300?text=No+Cover"
-            st.markdown(f'<img src="{cov}" style="width:100%; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">', unsafe_allow_html=True)
-            st.write("")
-            if book.get('Bewertung'):
-                st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
-            
-            if "Tags" in book and book["Tags"]:
-                st.write("")
-                tags_list = book["Tags"].split(",")
-                tag_html = ""
-                for t in tags_list:
-                    tag_html += f'<span class="book-tag">{t.strip()}</span>'
-                st.markdown(tag_html, unsafe_allow_html=True)
-            
-        with col2:
-            ai_data = None
-            if "gemini_api_key" in st.secrets:
-                with st.spinner("✨ KI liest..."):
-                    ai_data = get_ai_book_info(book["Titel"], book["Autor"])
-            else: st.warning("Kein API Key.")
-
-            if ai_data:
-                st.markdown(f"""
-                <div class="ai-box">
-                    <b>📖 Worum geht's?</b><br>{ai_data.get('teaser', 'Ladefehler')}
-                </div>
-                <div class="ai-box" style="border-left-color: #2980b9; background-color: #eaf2f8; margin-top:10px;">
-                    <b>👤 Autor</b><br>{ai_data.get('bio', '-')}
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            wiki_book = f"https://de.wikipedia.org/w/index.php?search={urllib.parse.quote(book['Titel'])}"
-            google_search = f"https://www.google.com/search?q={urllib.parse.quote(book['Titel'] + ' ' + book['Autor'])}"
-            st.markdown(f"[🔍 Google]({google_search}) | [📖 Wiki]({wiki_book})")
-
-    with d_tab2:
-        st.write("Daten bearbeiten.")
-        with st.form("edit_book_form"):
-            new_title = st.text_input("Titel", value=book["Titel"])
-            new_author = st.text_input("Autor", value=book["Autor"])
-            
-            current_y = book.get("Erschienen", "")
-            new_year = st.text_input("Erscheinungsjahr", value=current_y)
-            
-            current_tags = book.get("Tags", "")
-            new_tags = st.text_input("Tags", value=current_tags)
-            
-            if st.form_submit_button("💾 Änderungen speichern"):
-                try:
-                    cell = ws_books.find(book["Titel"])
-                    headers = [str(h).lower() for h in ws_books.row_values(1)]
-                    col_t = headers.index("titel") + 1
-                    col_a = headers.index("autor") + 1
-                    
-                    try: col_tags = headers.index("tags") + 1
-                    except: col_tags = len(headers) + 1 
-                    try: col_y = headers.index("erschienen") + 1
-                    except: col_y = len(headers) + 2
-                    
-                    ws_books.update_cell(cell.row, col_t, new_title)
-                    ws_books.update_cell(cell.row, col_a, new_author)
-                    ws_books.update_cell(cell.row, col_tags, new_tags)
-                    ws_books.update_cell(cell.row, col_y, new_year)
-                    
-                    cleanup_author_duplicates_batch(ws_books, ws_authors)
-                    del st.session_state.df_books
-                    st.success("Gespeichert!")
-                    time.sleep(1); st.rerun()
-                except: st.error("Fehler beim Speichern")
-
-        st.markdown("---")
-        st.markdown("**Gefahrenzone**")
-        if st.button("🗑️ Buch unwiderruflich löschen", type="primary"):
-            if delete_book(ws_books, book["Titel"]):
-                del st.session_state.df_books
-                st.success("Gelöscht!")
-                time.sleep(1); st.rerun()
-            else: st.error("Fehler beim Löschen.")
-
 # --- MAIN ---
 def main():
     st.title("📚 Meine Bibliothek")
@@ -537,7 +462,7 @@ def main():
         
         # --- DIAGNOSE ANZEIGE ---
         if "working_model" not in st.session_state:
-            with st.spinner("Prüfe API Key..."):
+            with st.spinner("Modellsuche (ignoriere 2.5)..."):
                 m, err = check_api_key_models()
                 if m: 
                     st.session_state.working_model = m
