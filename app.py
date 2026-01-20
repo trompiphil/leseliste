@@ -8,7 +8,6 @@ import urllib.parse
 from datetime import datetime
 from deep_translator import GoogleTranslator
 import json
-import threading
 import re
 
 # --- KONFIGURATION ---
@@ -25,7 +24,6 @@ st.markdown("""
     [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
     .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
     .book-tag { display: inline-block; background-color: #d35400; color: white !important; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-right: 5px; margin-bottom: 5px; font-weight: bold; }
-    .log-box { font-family: monospace; font-size: 0.8em; background-color: #333; color: #0f0; padding: 10px; border-radius: 5px; max-height: 300px; overflow-y: scroll; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -45,17 +43,9 @@ def setup_sheets(client):
     try: sh = client.open("Bücherliste") 
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
     ws_books = sh.sheet1
-    try: ws_logs = sh.worksheet("Logs")
-    except: ws_logs = sh.add_worksheet(title="Logs", rows=1000, cols=3); ws_logs.append_row(["Zeitstempel", "Typ", "Nachricht"])
     try: ws_authors = sh.worksheet("Autoren")
     except: ws_authors = sh.add_worksheet(title="Autoren", rows=1000, cols=1); ws_authors.update_cell(1, 1, "Name")
-    return ws_books, ws_logs, ws_authors
-
-def log_event(ws_logs, message, msg_type="INFO"):
-    try:
-        ts = datetime.now().strftime("%H:%M:%S")
-        ws_logs.append_row([ts, msg_type, str(message)])
-    except: pass
+    return ws_books, ws_authors
 
 def check_structure(ws):
     try:
@@ -91,6 +81,22 @@ def get_data(ws):
             if d["Titel"]: data.append(d)
         return pd.DataFrame(data)
     except: return pd.DataFrame(columns=cols)
+
+def update_single_entry(ws, titel, field, value):
+    try:
+        cell = ws.find(titel)
+        headers = [str(h).lower() for h in ws.row_values(1)]
+        col = headers.index(field.lower()) + 1
+        ws.update_cell(cell.row, col, value)
+        return True
+    except: return False
+
+def delete_book(ws, titel):
+    try:
+        cell = ws.find(titel)
+        ws.delete_rows(cell.row)
+        return True
+    except: return False
 
 def update_full_dataframe(ws, new_df):
     current_data = ws.get_all_values()
@@ -132,7 +138,7 @@ def fetch_meta(titel, autor):
         except: pass
     return c, g, y
 
-# --- ROBUSTER KI CORE ---
+# --- AI & MODELL SUCHE ---
 def clean_json_string(text):
     try:
         match = re.search(r'\{.*\}', text, re.DOTALL)
@@ -140,30 +146,28 @@ def clean_json_string(text):
         return text
     except: return text
 
-# Findet das beste Modell (OHNE Streamlit Cache, für den Thread)
-def find_working_model_pure(api_key):
+def find_best_model(api_key):
+    """Findet das beste Modell (vermeidet 2.5 wenn möglich, priorisiert 2.0-exp)"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         r = requests.get(url)
         if r.status_code == 200:
             data = r.json()
-            valid_models = []
+            valid = []
             for m in data.get('models', []):
                 if 'generateContent' in m.get('supportedGenerationMethods', []):
-                    valid_models.append(m['name'].split('/')[-1])
+                    valid.append(m['name'].split('/')[-1])
             
-            # WICHTIG: 2.0-flash-exp und 1.5-flash-8b bevorzugen, 1.5-flash als fallback
-            priority = ["gemini-2.0-flash-exp", "gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-1.5-pro"]
+            # Prio Liste
+            prio = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"]
+            for p in prio:
+                if p in valid: return p
             
-            for p in priority:
-                if p in valid_models: return p
-            
-            if valid_models: return valid_models[0]
-            
+            if valid: return valid[0]
         return None
     except: return None
 
-def call_gemini(prompt, model_name):
+def call_gemini_manual(prompt, model_name):
     api_key = st.secrets["gemini_api_key"]
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
@@ -175,100 +179,21 @@ def call_gemini(prompt, model_name):
                 res = response.json()
                 txt = res['candidates'][0]['content']['parts'][0]['text']
                 return clean_json_string(txt), None
-            except: return None, f"Parse Fehler. Raw: {response.text}"
-        elif response.status_code == 429: return None, "RATELIMIT" # Spezielles Keyword
-        elif response.status_code == 404: return None, f"Modell nicht gefunden (404)"
-        else: return None, f"HTTP Fehler {response.status_code}: {response.text}"
+            except: return None, "Parse Fehler"
+        elif response.status_code == 429: return None, "RATE_LIMIT"
+        else: return None, f"Fehler {response.status_code}"
     except Exception as e: return None, str(e)
 
-def fetch_all_ai_data_debug(titel, autor, model_name, ws_logs):
+def fetch_all_ai_data_manual(titel, autor, model_name):
     prompt = f"""
     Buch: "{titel}" von {autor}.
     Erstelle ein JSON mit genau diesen Keys: "tags", "year", "teaser" (max 60 Worte), "bio" (max 30 Worte).
-    Antworte NUR mit dem JSON String. Keine Markdown Formatierung.
+    Antworte NUR mit dem JSON String.
     """
-    txt, err = call_gemini(prompt, model_name)
-    
-    if err:
-        if "RATELIMIT" in err: return "RATELIMIT" # Fehler hochreichen
-        log_event(ws_logs, f"KI Fehler bei '{titel}': {err}", "ERROR")
-        return {}
-    
-    try: 
-        data = json.loads(txt)
-        return data
-    except Exception as e: 
-        log_event(ws_logs, f"JSON Parse Error bei '{titel}': {str(e)}", "ERROR")
-        return {}
-
-# --- BACKGROUND WORKER (SINGLETON) ---
-def background_worker_process(missing_books_data, creds_dict):
-    try:
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        if "private_key" in creds_dict: creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(creds)
-        sh = client.open("Bücherliste")
-        ws = sh.sheet1
-        try: ws_logs = sh.worksheet("Logs")
-        except: ws_logs = sh.add_worksheet("Logs", 1000, 3)
-        
-        log_event(ws_logs, "Autopilot gestartet (Singleton).", "START")
-        
-        api_key = st.secrets["gemini_api_key"]
-        model_name = find_working_model_pure(api_key)
-        
-        if not model_name:
-            log_event(ws_logs, "Kein Modell im Hintergrund gefunden!", "ERROR")
-            return
-            
-        log_event(ws_logs, f"Nutze Modell: {model_name}", "INIT")
-        
-        headers = [str(h).lower() for h in ws.row_values(1)]
-        c_tag = headers.index("tags") + 1
-        c_year = headers.index("erschienen") + 1
-        c_teaser = headers.index("teaser") + 1
-        c_bio = headers.index("bio") + 1
-
-        for book in missing_books_data:
-            # Schneller Start für den ersten, dann Pausen
-            time.sleep(5) 
-            
-            titel = book['Titel']
-            log_event(ws_logs, f"Bearbeite: {titel}", "INFO")
-            
-            ai_data = fetch_all_ai_data_debug(titel, book['Autor'], model_name, ws_logs)
-            
-            if ai_data == "RATELIMIT":
-                log_event(ws_logs, f"Rate Limit! Warte 60s...", "WARN")
-                time.sleep(60) # Strafbank
-                # Versuch es für das gleiche Buch nochmal beim nächsten Loop oder überspring
-                continue 
-            
-            if isinstance(ai_data, dict) and ai_data:
-                try:
-                    cell = ws.find(titel)
-                    if ai_data.get("tags"): ws.update_cell(cell.row, c_tag, ai_data["tags"])
-                    if ai_data.get("year"): ws.update_cell(cell.row, c_year, ai_data["year"])
-                    if ai_data.get("teaser"): ws.update_cell(cell.row, c_teaser, ai_data["teaser"])
-                    if ai_data.get("bio"): ws.update_cell(cell.row, c_bio, ai_data["bio"])
-                    log_event(ws_logs, f"Erfolg: {titel}", "SUCCESS")
-                except Exception as e:
-                    log_event(ws_logs, f"Sheet Fehler: {str(e)}", "ERROR")
-            else:
-                log_event(ws_logs, f"Keine Daten erhalten für {titel}", "WARN")
-                
-        log_event(ws_logs, "Alle Aufträge erledigt.", "END")
-                
-    except Exception as e:
-        print(f"Background Crash: {e}")
-
-# --- HELPERS ---
-def smart_author(short, known):
-    s = short.strip().lower()
-    for k in sorted(known, key=len, reverse=True):
-        if s in str(k).lower(): return k
-    return short
+    txt, err = call_gemini_manual(prompt, model_name)
+    if err: return None, err
+    try: return json.loads(txt), None
+    except: return None, "JSON Fehler"
 
 def cleanup_author_duplicates_batch(ws_books, ws_authors):
     import unicodedata
@@ -312,12 +237,95 @@ def cleanup_author_duplicates_batch(ws_books, ws_authors):
     if final_authors: ws_authors.update(values=[["Name"]] + [[a] for a in sorted(list(final_authors))])
     return 1
 
-def delete_book(ws, titel):
-    try:
-        cell = ws.find(titel)
-        ws.delete_rows(cell.row)
-        return True
-    except: return False
+# --- DIALOG & HELPERS (MUST BE DEFINED BEFORE MAIN) ---
+def smart_author(short, known):
+    s = short.strip().lower()
+    for k in sorted(known, key=len, reverse=True):
+        if s in str(k).lower(): return k
+    return short
+
+@st.dialog("📖 Buch-Details")
+def show_book_details(book, ws_books, ws_authors):
+    d_tab1, d_tab2 = st.tabs(["ℹ️ Info", "✏️ Bearbeiten"])
+    with d_tab1:
+        st.markdown(f"### {book['Titel']}")
+        year_str = f" ({book.get('Erschienen')})" if book.get('Erschienen') else ""
+        st.markdown(f"**von {book['Autor']}{year_str}**")
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            cov = book["Cover"] if book["Cover"] != "-" else "https://via.placeholder.com/200x300?text=No+Cover"
+            st.markdown(f'<img src="{cov}" style="width:100%; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">', unsafe_allow_html=True)
+            st.write("")
+            if book.get('Bewertung'):
+                st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
+            if "Tags" in book and book["Tags"]:
+                st.write("")
+                tags_list = book["Tags"].split(",")
+                tag_html = ""
+                for t in tags_list:
+                    tag_html += f'<span class="book-tag">{t.strip()}</span>'
+                st.markdown(tag_html, unsafe_allow_html=True)
+        with col2:
+            # NUR LESEN
+            teaser = book.get("Teaser", "")
+            bio = book.get("Bio", "")
+            if not teaser or len(str(teaser)) < 5: teaser_disp = "<i>(Keine Info. Bitte 'Fehlende Infos laden' nutzen)</i>"
+            else: teaser_disp = teaser
+            if not bio or len(str(bio)) < 5: bio_disp = "-"
+            else: bio_disp = bio
+
+            st.markdown(f"""
+            <div class="ai-box">
+                <b>📖 Worum geht's?</b><br>{teaser_disp}
+            </div>
+            <div class="ai-box" style="border-left-color: #2980b9; background-color: #eaf2f8; margin-top:10px;">
+                <b>👤 Autor</b><br>{bio_disp}
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("---")
+            wiki_book = f"https://de.wikipedia.org/w/index.php?search={urllib.parse.quote(book['Titel'])}"
+            google = f"https://www.google.com/search?q={urllib.parse.quote(book['Titel'] + ' ' + book['Autor'])}"
+            st.markdown(f"[🔍 Google]({google}) | [📖 Wiki]({wiki_book})")
+
+    with d_tab2:
+        with st.form("edit_book_form"):
+            new_title = st.text_input("Titel", value=book["Titel"])
+            new_author = st.text_input("Autor", value=book["Autor"])
+            new_year = st.text_input("Erscheinungsjahr", value=book.get("Erschienen", ""))
+            new_tags = st.text_input("Tags", value=book.get("Tags", ""))
+            new_teaser = st.text_area("Teaser", value=book.get("Teaser", ""))
+            new_bio = st.text_area("Bio", value=book.get("Bio", ""))
+            if st.form_submit_button("💾 Speichern"):
+                try:
+                    cell = ws_books.find(book["Titel"])
+                    headers = [str(h).lower() for h in ws_books.row_values(1)]
+                    col_t = headers.index("titel") + 1
+                    col_a = headers.index("autor") + 1
+                    try: col_tags = headers.index("tags") + 1
+                    except: col_tags = len(headers) + 1 
+                    try: col_y = headers.index("erschienen") + 1
+                    except: col_y = len(headers) + 2
+                    try: col_teaser = headers.index("teaser") + 1
+                    except: col_teaser = len(headers) + 3
+                    try: col_bio = headers.index("bio") + 1
+                    except: col_bio = len(headers) + 4
+                    
+                    ws_books.update_cell(cell.row, col_t, new_title)
+                    ws_books.update_cell(cell.row, col_a, new_author)
+                    ws_books.update_cell(cell.row, col_tags, new_tags)
+                    ws_books.update_cell(cell.row, col_y, new_year)
+                    ws_books.update_cell(cell.row, col_teaser, new_teaser)
+                    ws_books.update_cell(cell.row, col_bio, new_bio)
+                    
+                    cleanup_author_duplicates_batch(ws_books, ws_authors)
+                    del st.session_state.df_books
+                    st.success("Gespeichert!"); time.sleep(1); st.rerun()
+                except: st.error("Fehler")
+        st.markdown("---")
+        if st.button("🗑️ Löschen", type="primary"):
+            if delete_book(ws_books, book["Titel"]):
+                del st.session_state.df_books
+                st.success("Gelöscht!"); time.sleep(1); st.rerun()
 
 # --- MAIN ---
 def main():
@@ -325,7 +333,7 @@ def main():
     
     client = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
-    ws_books, ws_logs, ws_authors = setup_sheets(client)
+    ws_books, ws_authors = setup_sheets(client)
     
     if "checked" not in st.session_state: check_structure(ws_books); st.session_state.checked=True
     if "df_books" not in st.session_state: 
@@ -340,43 +348,79 @@ def main():
     df = st.session_state.df_books
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
     
-    # --- BACKGROUND CHECK (SINGLETON) ---
-    
-    # Check if thread is already running
-    is_running = any(t.name == "BackgroundWorker" for t in threading.enumerate())
-    
-    if not is_running:
-        missing_books = []
-        if not df.empty:
-            for i, r in df.iterrows():
-                # Nur fehlende bearbeiten
-                if len(str(r.get("Teaser", ""))) < 5 or len(str(r.get("Tags", ""))) < 2:
-                    missing_books.append(r.to_dict())
-        
-        if missing_books:
-            creds = dict(st.secrets["gcp_service_account"])
-            # Thread mit festem Namen starten
-            t = threading.Thread(target=background_worker_process, args=(missing_books, creds), name="BackgroundWorker")
-            t.start()
-            st.toast(f"Hintergrund-Dienst gestartet ({len(missing_books)} Bücher)")
-
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
         if st.button("🔄 Cache leeren"): 
             st.session_state.clear(); st.rerun()
         
         st.markdown("---")
-        st.write("📜 **System-Log (Live)**")
-        try:
-            logs = ws_logs.get_all_values()
-            if len(logs) > 1:
-                last_logs = logs[-6:]
-                log_text = ""
-                for l in reversed(last_logs):
-                    log_text += f"[{l[0].split(' ')[0]}] {l[2]}\n"
-                st.markdown(f"<div class='log-box'>{log_text}</div>", unsafe_allow_html=True)
-            else: st.info("Keine Logs.")
-        except: st.warning("Log-Fehler")
+        st.write("🤖 **KI-Update (Manuell)**")
+        
+        # Finde Lücken
+        missing_count = 0
+        missing_indices = []
+        if not df.empty:
+            for i, r in df.iterrows():
+                if len(str(r.get("Teaser", ""))) < 5:
+                    missing_count += 1
+                    missing_indices.append(i)
+        
+        if missing_count > 0:
+            st.info(f"{missing_count} Bücher ohne volle Infos.")
+            if st.button("✨ Fehlende Infos laden"):
+                # DER MANUELLE PROZESS
+                api_key = st.secrets.get("gemini_api_key")
+                if not api_key: st.error("Kein API Key"); st.stop()
+                
+                with st.status("Verbinde mit KI...", expanded=True) as status:
+                    model_name = find_best_model(api_key)
+                    if not model_name:
+                        status.update(label="Fehler: Kein Modell gefunden", state="error")
+                    else:
+                        status.write(f"Modell: {model_name}")
+                        prog_bar = status.progress(0)
+                        
+                        headers = [str(h).lower() for h in ws_books.row_values(1)]
+                        try:
+                            c_tag = headers.index("tags") + 1
+                            c_year = headers.index("erschienen") + 1
+                            c_teaser = headers.index("teaser") + 1
+                            c_bio = headers.index("bio") + 1
+                        except: st.error("Tabellenstruktur falsch"); st.stop()
+                        
+                        done = 0
+                        for idx in missing_indices:
+                            row = df.loc[idx]
+                            status.write(f"Bearbeite: **{row['Titel']}**...")
+                            
+                            ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], model_name)
+                            
+                            if err == "RATE_LIMIT":
+                                status.write("⏳ Rate Limit! Warte 60s...")
+                                time.sleep(60)
+                                # Versuch 2
+                                ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], model_name)
+                            
+                            if ai_data:
+                                try:
+                                    cell = ws_books.find(row["Titel"])
+                                    if ai_data.get("tags"): ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
+                                    if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
+                                    if ai_data.get("teaser"): ws_books.update_cell(cell.row, c_teaser, ai_data["teaser"])
+                                    if ai_data.get("bio"): ws_books.update_cell(cell.row, c_bio, ai_data["bio"])
+                                except: pass
+                            
+                            done += 1
+                            prog_bar.progress(done / missing_count)
+                            # SICHERHEITSPAUSE: 10 Sekunden pro Buch!
+                            time.sleep(10)
+                        
+                        status.update(label="Fertig!", state="complete", expanded=False)
+                        del st.session_state.df_books
+                        time.sleep(1)
+                        st.rerun()
+        else:
+            st.success("Alle Bücher aktuell.")
 
     tab_neu, tab_sammlung, tab_merkliste, tab_stats = st.tabs(["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"])
     
@@ -395,10 +439,11 @@ def main():
                     fa = smart_author(a, authors)
                     with st.spinner("Speichere..."):
                         c, g, y = fetch_meta(t, fa)
+                        # Wir speichern erst mal ohne KI Daten, um den User nicht warten zu lassen
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         cleanup_author_duplicates_batch(ws_books, ws_authors)
                         del st.session_state.df_books
-                    st.success(f"Gespeichert: {t} (KI läuft im Hintergrund)"); time.sleep(1.0); st.rerun()
+                    st.success(f"Gespeichert: {t}"); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
     with tab_sammlung:
