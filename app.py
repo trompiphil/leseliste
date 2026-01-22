@@ -18,9 +18,8 @@ st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide
 NAV_OPTIONS = ["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"]
 if "active_tab" not in st.session_state: st.session_state.active_tab = NAV_OPTIONS[1]
 if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab = NAV_OPTIONS[1]
-if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 
-# --- CSS DESIGN ---
+# --- CSS DESIGN (THE NUCLEAR OPTION) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
@@ -33,8 +32,8 @@ st.markdown("""
         border: 1px solid #d35400 !important;
         font-size: 0.9em !important;
         padding: 0px !important; 
-        min-height: 2.0rem !important;
-        height: 2.0rem !important;
+        min-height: 2.2rem !important;
+        height: 2.2rem !important;
         width: 100% !important;
         margin: 0 !important;
         display: flex;
@@ -77,22 +76,8 @@ st.markdown("""
     .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.8em; color: #d35400; font-weight: bold; margin-left: 5px; }
     
     /* --- COLOR BOXES (Info Dialog) --- */
-    .box-teaser {
-        background-color: #fff8e1;
-        border-left: 4px solid #d35400;
-        padding: 10px;
-        border-radius: 4px;
-        margin-bottom: 10px;
-        color: #2c3e50;
-    }
-    .box-author {
-        background-color: #eaf2f8;
-        border-left: 4px solid #2980b9;
-        padding: 10px;
-        border-radius: 4px;
-        margin-top: 10px;
-        color: #2c3e50;
-    }
+    .box-teaser { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 10px; border-radius: 4px; margin-bottom: 10px; color: #2c3e50; }
+    .box-author { background-color: #eaf2f8; border-left: 4px solid #2980b9; padding: 10px; border-radius: 4px; margin-top: 10px; color: #2c3e50; }
 
     /* --- LAYOUT ENFORCER (MOBILE & DESKTOP) --- */
     
@@ -126,8 +111,10 @@ st.markdown("""
         min-width: 0 !important;
     }
 
-    /* 3. BUTTONS NEBENEINANDER ZWINGEN (Das ist der Fix!) */
-    /* Wir zielen auf alle HorizontalBlocks, die INNERHALB einer Spalte sind (das sind unsere Button-Reihen) */
+    /* --- DER FIX FÜR DIE BUTTONS --- */
+    /* Wir überschreiben die Mobile-Regel von Streamlit, die Spalten auf 100% setzt */
+    
+    /* Container der Button-Reihe */
     [data-testid="column"] [data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-direction: row !important; /* IMMER Reihe */
@@ -135,15 +122,18 @@ st.markdown("""
         gap: 5px !important;
     }
     
-    /* Die Spalten der Buttons selbst müssen flexibel sein */
+    /* Die einzelnen Spalten der Buttons */
     [data-testid="column"] [data-testid="stHorizontalBlock"] [data-testid="column"] {
-        min-width: 0 !important; /* Erlaubt schrumpfen */
-        flex: 1 !important; /* Jeder Button kriegt gleichen Anteil */
-        width: auto !important;
+        width: auto !important; /* Nicht 100% */
+        flex: 1 !important; /* Gleichmäßig verteilen */
+        min-width: 0 !important;
+    }
+    
+    /* Der vierte Column (Spacer) soll flexibel sein */
+    [data-testid="column"] [data-testid="stHorizontalBlock"] [data-testid="column"]:nth-child(4) {
+        flex: 5 !important; /* Der Spacer nimmt den meisten Platz */
     }
 
-    .status-running { color: #d35400; font-weight: bold; animation: pulse 2s infinite; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     </style>
 """, unsafe_allow_html=True)
 
@@ -295,7 +285,8 @@ def filter_and_sort_books(df_in, query, sort_by):
         df = df[mask]
     
     if sort_by == "Autor (A-Z)":
-        df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x else "")
+        # Verbesserte Nachnamen-Erkennung: Letztes Wort nehmen, aber robust
+        df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x and str(x).strip() else "zzz")
         df = df.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
@@ -399,38 +390,6 @@ def smart_author(short, known):
         if s in str(k).lower(): return k
     return short
 
-# --- BACKGROUND WORKER ---
-def background_update_task(missing_indices, df_copy, model_name, ws_books, ws_logs):
-    log_to_sheet(ws_logs, "🚀 Hintergrund-Update gestartet", "START")
-    headers = [str(h).lower() for h in ws_books.row_values(1)]
-    try:
-        c_tag = headers.index("tags") + 1
-        c_year = headers.index("erschienen") + 1
-        c_teaser = headers.index("teaser") + 1
-        c_bio = headers.index("bio") + 1
-    except: 
-        log_to_sheet(ws_logs, "Spaltenfehler im Background Worker", "ERROR")
-        return
-
-    for idx in missing_indices:
-        try:
-            row = df_copy.loc[idx]
-            ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], model_name)
-            if err == "RATE_LIMIT":
-                time.sleep(60)
-                ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], model_name)
-            if ai_data:
-                cell = ws_books.find(row["Titel"])
-                if ai_data.get("tags") and ai_data["tags"] != "-": ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
-                if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
-                ws_books.update_cell(cell.row, c_teaser, ai_data.get("teaser", "-"))
-                if ai_data.get("bio") and ai_data["bio"] != "-": ws_books.update_cell(cell.row, c_bio, ai_data.get("bio", "-"))
-                log_to_sheet(ws_logs, f"Background: {row['Titel']} fertig", "SUCCESS")
-            time.sleep(1.0)
-        except Exception as e: log_to_sheet(ws_logs, f"Error bei {row['Titel']}: {e}", "ERROR")
-    auto_cleanup_authors(ws_books)
-    log_to_sheet(ws_logs, "✅ Hintergrund-Update beendet", "DONE")
-
 # --- UI DIALOGS ---
 @st.dialog("🖼️ Cover auswählen")
 def open_cover_gallery(book, ws_books, ws_logs):
@@ -477,7 +436,6 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 st.write("")
                 for t in book["Tags"].split(","): st.markdown(f'<span class="book-tag">{t.strip()}</span>', unsafe_allow_html=True)
         with c2:
-            # HIER SIND DIE BUNTEN BOXEN WIEDER:
             st.markdown(f"""
             <div class="box-teaser">
                 <b>📖 Teaser</b><br>{book.get('Teaser', '...')}
@@ -572,13 +530,6 @@ def main():
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
         st.markdown(f"🔗 [**📂 Tabelle öffnen**](https://docs.google.com/spreadsheets/d/{sh.id})")
-        if st.session_state.background_status == "running":
-            st.markdown("<div class='status-running'>🔄 Hintergrund-Update läuft...</div>", unsafe_allow_html=True)
-            is_running = any(t.name == "BackgroundUpdater" for t in threading.enumerate())
-            if not is_running:
-                st.session_state.background_status = "idle"
-                force_reload()
-                st.rerun()
         if st.button("🔄 Cache leeren"): force_reload(); st.rerun()
         if st.button("🛠️ Schreibtest"):
             try: ws_logs.update_cell(1, 3, "TEST_OK"); log_to_sheet(ws_logs, "Test", "DEBUG"); st.success("Erfolg!")
@@ -615,14 +566,40 @@ def main():
             st.info(f"{missing_count} Bücher offen.")
             if missing_count < 10:
                 for idx in missing_indices: st.markdown(f"<div class='problem-book'>• {df.loc[idx]['Titel']}</div>", unsafe_allow_html=True)
-            if st.button("✨ Infos laden (Hintergrund)"):
+            if st.button("✨ Infos laden"):
                 if not selected_model: st.error("Kein Modell!"); st.stop()
-                t = threading.Thread(target=background_update_task, args=(missing_indices, df.copy(), selected_model, ws_books, ws_logs), name="BackgroundUpdater")
-                t.start()
-                st.session_state.background_status = "running"
-                st.toast("Hintergrund-Update gestartet!")
-                time.sleep(0.5)
-                st.rerun()
+                with st.status("Lade Infos...", expanded=True) as status:
+                    prog_bar = status.progress(0)
+                    headers = [str(h).lower() for h in ws_books.row_values(1)]
+                    try:
+                        c_tag, c_year = headers.index("tags") + 1, headers.index("erschienen") + 1
+                        c_teaser, c_bio = headers.index("teaser") + 1, headers.index("bio") + 1
+                    except: st.error("Spaltenfehler"); st.stop()
+                    
+                    done = 0
+                    for idx in missing_indices:
+                        row = df.loc[idx]
+                        status.write(f"Bearbeite: **{row['Titel']}**...")
+                        ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
+                        if err == "RATE_LIMIT":
+                            status.write("⏳ Limit! Warte 60s...")
+                            time.sleep(60)
+                            ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], selected_model)
+                        if ai_data:
+                            try:
+                                cell = ws_books.find(row["Titel"])
+                                if ai_data.get("tags") and ai_data["tags"] != "-": ws_books.update_cell(cell.row, c_tag, ai_data["tags"])
+                                if ai_data.get("year"): ws_books.update_cell(cell.row, c_year, ai_data["year"])
+                                ws_books.update_cell(cell.row, c_teaser, ai_data.get("teaser", "-"))
+                                if ai_data.get("bio") and ai_data["bio"] != "-": ws_books.update_cell(cell.row, c_bio, ai_data.get("bio", "-"))
+                            except Exception as e: log_to_sheet(ws_logs, f"Error: {e}", "ERROR")
+                        done += 1
+                        prog_bar.progress(done / missing_count)
+                        time.sleep(1.0)
+                    auto_cleanup_authors(ws_books)
+                    force_reload()
+                    status.update(label="Fertig!", state="complete", expanded=False)
+                    time.sleep(1); st.rerun()
         else: st.success("Alles aktuell.")
         with st.expander("📜 System-Log", expanded=False):
             try:
@@ -693,6 +670,7 @@ def main():
             cols = st.columns(3)
             for i, (idx, row) in enumerate(df_filtered.iterrows()):
                 with cols[i % 3]:
+                    # Mit CSS-Klasse "tile-container" für gezieltes Styling
                     with st.container(border=True):
                         # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
                         c_img, c_content = st.columns([1, 2])
@@ -713,12 +691,9 @@ def main():
                                 st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
                             else: st.caption("Noch kein Teaser.")
                             
-                            # HIER IST DER TRICK: Buttons eng zusammen
-                            # Wir verzichten auf st.write("") spacer um DOM nesting zu vermeiden
-                            # Und nutzen [1,1,1,5] damit sie links kleben
+                            st.write("")
+                            # Buttons - mit Type für Styling
                             b1, b2, b3, _ = st.columns([1, 1, 1, 5], gap="small")
-                            
-                            # WICHTIG: Kein Spacer davor!
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details", type="primary"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
                             if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover", type="secondary"):
