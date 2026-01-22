@@ -21,29 +21,37 @@ if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab =
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 if "bg_message" not in st.session_state: st.session_state.bg_message = None
 
-# --- CSS DESIGN (CLEAN OPTION B) ---
+# --- CSS DESIGN (COMPACT TILE) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
     
-    /* --- BUTTONS --- */
+    /* --- BUTTONS (MINI) --- */
     .stButton button {
-        border-radius: 8px !important;
+        border-radius: 6px !important;
         border: 1px solid #d35400 !important;
-        font-weight: bold;
+        font-size: 0.8rem !important; /* Kleinere Schrift */
+        padding: 2px 8px !important;   /* Minimales Padding */
+        min-height: 0px !important;
+        height: auto !important;       /* Nur so hoch wie nötig */
+        line-height: 1.2 !important;
+        margin-top: 5px !important;
+        width: 100% !important;        /* Füllt die Textspalte, nicht den Screen */
     }
-    .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; }
-    .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; }
+    
+    /* Farben */
+    .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; font-weight: normal; }
+    .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; opacity: 0.7; }
 
     /* --- KACHEL CONTAINER --- */
     [data-testid="stVerticalBlockBorderWrapper"] > div { 
         background-color: #eaddcf; 
-        border-radius: 12px; 
+        border-radius: 8px; 
         border: 1px solid #d35400; 
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1); 
-        padding: 10px;
+        box-shadow: 1px 1px 3px rgba(0,0,0,0.1); 
+        padding: 8px;
     }
     
     /* Navigation */
@@ -52,17 +60,27 @@ st.markdown("""
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
     
     /* Text Styles */
-    .tile-title { font-weight: bold; font-size: 1.1em; line-height: 1.2; margin-bottom: 2px; display: block; }
-    .tile-meta { font-size: 0.9em; color: #555; margin-bottom: 4px; display: block; }
-    .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.8em; color: #d35400; font-weight: bold; margin-left: 5px; }
+    .tile-title { font-weight: bold; font-size: 1.0em; line-height: 1.2; margin-bottom: 2px; display: block; }
+    .tile-meta { font-size: 0.85em; color: #555; margin-bottom: 4px; display: block; }
+    .tile-teaser { 
+        font-size: 0.8em; 
+        color: #444; 
+        margin-top: 4px; 
+        margin-bottom: 6px;
+        font-style: italic; 
+        line-height: 1.3; 
+        display: -webkit-box; 
+        -webkit-line-clamp: 7; /* Max 7 Zeilen Teaser */
+        -webkit-box-orient: vertical; 
+        overflow: hidden; 
+    }
+    .year-badge { background-color: #fff8e1; padding: 1px 4px; border-radius: 3px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; font-weight: bold; margin-left: 5px; }
     
     /* Bunte Boxen im Dialog */
     .box-teaser { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 10px; border-radius: 4px; margin-bottom: 10px; color: #2c3e50; }
     .box-author { background-color: #eaf2f8; border-left: 4px solid #2980b9; padding: 10px; border-radius: 4px; margin-top: 10px; color: #2c3e50; }
 
-    /* --- MOBILE LAYOUT (BILD LINKS | TEXT RECHTS) --- */
-    
-    /* 1. Bildgröße fixieren */
+    /* --- MOBILE FORCE ROW --- */
     div[data-testid="stImage"] img {
         width: 80px !important;
         max-width: 80px !important;
@@ -70,7 +88,6 @@ st.markdown("""
         object-fit: contain; 
     }
 
-    /* 2. ZWINGE Kachel-Inhalt in eine Reihe */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-direction: row !important;
@@ -83,7 +100,7 @@ st.markdown("""
         flex: 0 0 80px !important;
         min-width: 80px !important;
         width: 80px !important;
-        margin-right: 15px !important;
+        margin-right: 12px !important;
     }
     
     /* Spalte 2 (Text): Rest */
@@ -382,6 +399,36 @@ def background_update_task(missing_indices, df_copy, model_name, ws_books, ws_lo
     log_to_sheet(ws_logs, "✅ Hintergrund-Update beendet", "DONE")
 
 # --- UI DIALOGS ---
+@st.dialog("🖼️ Cover auswählen")
+def open_cover_gallery(book, ws_books, ws_logs):
+    st.write(f"Suche Cover für **{book['Titel']}**...")
+    if "gallery_images" not in st.session_state:
+        with st.spinner("Suche..."):
+            log_to_sheet(ws_logs, f"Manuelle Suche für: {book['Titel']}", "SEARCH")
+            cands = fetch_cover_candidates_loose(book["Titel"], book["Autor"], ws_logs)
+            st.session_state.gallery_images = cands
+    if st.session_state.gallery_images:
+        cols = st.columns(3)
+        for i, img_url in enumerate(st.session_state.gallery_images):
+            with cols[i % 3]:
+                st.image(img_url, use_container_width=True)
+                if st.button("Übernehmen", key=f"gal_btn_{i}"):
+                    try:
+                        cell = ws_books.find(book["Titel"])
+                        headers = [str(h).lower() for h in ws_books.row_values(1)]
+                        try: c_col = headers.index("cover") + 1
+                        except: c_col = 5
+                        ws_books.update_cell(cell.row, c_col, img_url)
+                        log_to_sheet(ws_logs, f"Neues Cover gesetzt: {book['Titel']}", "UPDATE")
+                        auto_cleanup_authors(ws_books)
+                        force_reload()
+                        del st.session_state.gallery_images
+                        st.rerun()
+                    except Exception as e: st.error(f"Fehler: {e}")
+    else:
+        st.warning("Nichts gefunden.")
+        if st.button("Abbrechen"): st.rerun()
+
 @st.dialog("📖 Buch-Details")
 def show_book_details(book, ws_books, ws_authors, ws_logs):
     t1, t2 = st.tabs(["ℹ️ Info", "✏️ Bearbeiten"])
@@ -675,6 +722,16 @@ def main():
                                 except: s_val = 0
                                 if s_val > 0: st.markdown(f"<span style='color:#d35400'>{'★'*s_val}</span>", unsafe_allow_html=True)
                             
+                            teaser_text = row.get("Teaser", "")
+                            if teaser_text and len(str(teaser_text)) > 5:
+                                st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
+                            else: st.caption("Noch kein Teaser.")
+                            
+                            # --- DER EINZIGE BUTTON FÜR OPTION B ---
+                            # Innerhalb der Textspalte, damit er direkt drunter ist
+                            if st.button("ℹ️ Details", key=f"inf_{idx}_{is_wishlist}", type="primary"): 
+                                show_book_details(row, ws_books, ws_authors, ws_logs)
+                            
                             if is_wishlist:
                                 if st.button("✅ Gelesen", key=f"read_{idx}", use_container_width=True):
                                     cell = ws_books.find(row["Titel"])
@@ -682,11 +739,6 @@ def main():
                                     ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
                                     force_reload()
                                     st.rerun()
-                        
-                        # --- DER EINZIGE BUTTON FÜR OPTION B ---
-                        # Außerhalb der Spalten, damit er die volle Breite nimmt
-                        if st.button("ℹ️ Details & Aktionen", key=f"inf_{idx}_{is_wishlist}", use_container_width=True): 
-                            show_book_details(row, ws_books, ws_authors, ws_logs)
 
     if st.session_state.active_tab == "🔍 Sammlung":
         df_s = df[df["Status"] == "Gelesen"].copy()
