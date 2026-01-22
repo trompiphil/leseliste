@@ -20,27 +20,28 @@ if "active_tab" not in st.session_state: st.session_state.active_tab = NAV_OPTIO
 if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab = NAV_OPTIONS[1]
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 
-# --- CSS DESIGN (MOBILE FORCE ROW) ---
+# --- CSS DESIGN (THE ENFORCER VERSION) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
     
-    /* --- BUTTONS --- */
+    /* --- BUTTON STYLING --- */
     .stButton button {
         border-radius: 6px !important;
         border: 1px solid #d35400 !important;
-        font-size: 0.8em !important;
-        padding: 0.2rem 0.4rem !important; /* Sehr kompakt */
+        font-size: 0.85em !important;
+        padding: 0.2rem 0.1rem !important; /* Minimales Padding */
         min-height: 0px !important;
+        height: 32px !important; /* Fixe Höhe für Einheitlichkeit */
         line-height: 1.0 !important;
-        margin: 0px !important;
-        width: 100%; /* Füllt die Spalte */
+        width: 100% !important;
+        margin: 0 !important;
     }
 
     .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; }
-    .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; border-color: #d35400 !important; opacity: 0.7; }
+    .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; border-color: #d35400 !important; opacity: 0.6; }
     .stButton button[kind="secondary"]:hover { background-color: #fcece4 !important; opacity: 1; }
 
     /* --- KACHEL CONTAINER --- */
@@ -49,7 +50,7 @@ st.markdown("""
         border-radius: 12px; 
         border: 1px solid #d35400; 
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1); 
-        padding: 8px; /* Weniger Padding für Mobile */
+        padding: 10px; 
     }
     
     /* Navigation */
@@ -58,59 +59,71 @@ st.markdown("""
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
     
     /* Text Styles */
-    .tile-title { font-weight: bold; font-size: 1.0em; line-height: 1.2; margin-bottom: 2px; }
-    .tile-author { font-size: 0.85em; color: #555; margin-bottom: 5px; }
-    .tile-teaser { font-size: 0.8em; color: #666; margin-top: 5px; font-style: italic; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-    .problem-book { font-size: 0.8em; color: #c0392b; margin-top: -10px; margin-bottom: 10px; }
-    .year-badge { background-color: #fff8e1; padding: 1px 4px; border-radius: 3px; border: 1px solid #d35400; font-size: 0.7em; color: #d35400; display: inline-block; vertical-align: middle; margin-left: 4px; }
+    .tile-title { font-weight: bold; font-size: 1.05em; line-height: 1.2; margin-bottom: 2px; display: block; }
+    .tile-meta { font-size: 0.85em; color: #555; margin-bottom: 4px; display: block; }
+    .tile-teaser { 
+        font-size: 0.85em; 
+        color: #444; 
+        margin-top: 8px; 
+        font-style: italic; 
+        line-height: 1.4; 
+        display: -webkit-box; 
+        -webkit-line-clamp: 10; /* Mehr Text anzeigen (ca 10 Zeilen) */
+        -webkit-box-orient: vertical; 
+        overflow: hidden; 
+    }
+    .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.8em; color: #d35400; font-weight: bold; margin-left: 5px; }
     
-    /* --- MOBILE FORCE ROW HACK --- */
-    /* Dies verhindert, dass Spalten auf dem Handy untereinander rutschen */
+    /* --- MOBILE & DESKTOP LAYOUT ENFORCEMENT --- */
     
-    /* 1. Haupt-Container (Bild links, Text rechts) */
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
-        flex-direction: row !important; 
-        flex-wrap: nowrap !important;
-        align-items: flex-start !important;
-        gap: 10px !important;
+    /* 1. Haupt-Layout in der Kachel (Bild links, Text rechts) */
+    /* Wir zielen auf den ersten horizontalen Block in der Kachel */
+    [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-direction: row !important; /* ZWINGT NEBENEINANDER */
+        gap: 15px !important;
+        align-items: start !important;
     }
     
-    /* 2. Spaltenbreiten erzwingen */
-    /* Bild-Spalte */
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="column"]:nth-of-type(1) {
-        flex: 0 0 70px !important; /* Fest 70px */
-        min-width: 70px !important;
-        max-width: 70px !important;
+    /* Spalte 1: Bild (Fixiert) */
+    [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
+        width: 90px !important;
+        min-width: 90px !important;
+        max-width: 90px !important;
+        flex: 0 0 90px !important;
     }
-    /* Bild selbst */
+    
+    /* Bilder responsive innerhalb der fixen Spalte */
     [data-testid="stImage"] img {
         width: 100% !important;
-        object-fit: cover !important;
+        height: auto !important;
+        object-fit: cover;
         border-radius: 4px;
     }
-    
-    /* Text-Spalte */
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="column"]:nth-of-type(2) {
-        flex: 1 !important; /* Nimmt den Rest */
+
+    /* Spalte 2: Content (Flexibel) */
+    [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
+        width: auto !important;
+        flex: 1 1 auto !important; /* Nimmt den Restplatz */
         min-width: 0 !important; /* Verhindert Overflow */
     }
 
-    /* 3. BUTTON REIHE (Das nested horizontal block) */
-    /* Wir müssen hier tiefer selektieren, damit die Buttons nebeneinander bleiben */
-    /* Die Buttons sind im 2. Column -> Vertical Block -> Horizontal Block */
-    [data-testid="column"]:nth-of-type(2) [data-testid="stHorizontalBlock"] {
+    /* 2. Button-Reihe (Innerhalb von Spalte 2) */
+    /* Zwingt die Buttons in eine Zeile, egal wie schmal */
+    [data-testid="column"]:nth-child(2) [data-testid="stHorizontalBlock"] {
+        display: flex !important;
         flex-direction: row !important;
-        gap: 5px !important;
+        gap: 5px !important; /* Eng zusammen */
         margin-top: 5px !important;
     }
     
-    /* Die Button Spalten selbst */
-    [data-testid="column"]:nth-of-type(2) [data-testid="stHorizontalBlock"] [data-testid="column"] {
-        flex: 0 0 auto !important; /* Nur so breit wie nötig */
-        min-width: auto !important;
-        width: auto !important;
+    /* Die Spalten der Buttons selbst */
+    [data-testid="column"]:nth-child(2) [data-testid="stHorizontalBlock"] [data-testid="column"] {
+        min-width: 0 !important;
+        flex: 1 !important; /* Alle Buttons gleich breit */
     }
 
+    /* Status Animation */
     .status-running { color: #d35400; font-weight: bold; animation: pulse 2s infinite; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     </style>
@@ -262,6 +275,7 @@ def filter_and_sort_books(df_in, query, sort_by):
             df['Tags'].str.lower().str.contains(q, na=False)
         )
         df = df[mask]
+    
     if sort_by == "Autor (A-Z)":
         df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x else "")
         df = df.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
@@ -662,9 +676,11 @@ def main():
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
                         with c_content:
-                            st.write(f"**{row['Titel']}**")
+                            # Wir nutzen HTML Klassen für das Styling
+                            st.markdown(f"<span class='tile-title'>{row['Titel']}</span>", unsafe_allow_html=True)
+                            
                             year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
-                            st.markdown(f"<span style='font-size:0.9em; color:#555'>{row['Autor']}</span> {year_disp}", unsafe_allow_html=True)
+                            st.markdown(f"<span class='tile-meta'>{row['Autor']}{year_disp}</span>", unsafe_allow_html=True)
                             
                             if not is_wishlist:
                                 try: s_val = int(row['Bewertung'])
@@ -673,12 +689,12 @@ def main():
                             
                             teaser_text = row.get("Teaser", "")
                             if teaser_text and len(str(teaser_text)) > 5:
-                                short_teaser = str(teaser_text)[:150] + "..." if len(str(teaser_text)) > 150 else str(teaser_text)
-                                st.markdown(f"<div class='tile-teaser'>{short_teaser}</div>", unsafe_allow_html=True)
+                                # Teaser Text komplett rendern, CSS schneidet ab
+                                st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
                             else: st.caption("Noch kein Teaser.")
                             
                             st.write("")
-                            # Buttons
+                            # Buttons - mit Type für Styling
                             b1, b2, b3 = st.columns([1, 1, 1])
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details", type="primary"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
