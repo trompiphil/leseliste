@@ -33,8 +33,8 @@ st.markdown("""
         border: 1px solid #d35400 !important;
         font-size: 0.9em !important;
         padding: 0px !important; 
-        min-height: 2.2rem !important;
-        height: 2.2rem !important;
+        min-height: 2.0rem !important;
+        height: 2.0rem !important;
         width: 100% !important;
         margin: 0 !important;
         display: flex;
@@ -76,9 +76,27 @@ st.markdown("""
     }
     .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.8em; color: #d35400; font-weight: bold; margin-left: 5px; }
     
+    /* --- COLOR BOXES (Info Dialog) --- */
+    .box-teaser {
+        background-color: #fff8e1;
+        border-left: 4px solid #d35400;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+        color: #2c3e50;
+    }
+    .box-author {
+        background-color: #eaf2f8;
+        border-left: 4px solid #2980b9;
+        padding: 10px;
+        border-radius: 4px;
+        margin-top: 10px;
+        color: #2c3e50;
+    }
+
     /* --- LAYOUT ENFORCER (MOBILE & DESKTOP) --- */
     
-    /* Regel 1: Bildgröße fixieren */
+    /* 1. Bildgröße fixieren */
     div[data-testid="stImage"] img {
         width: 80px !important;
         max-width: 80px !important;
@@ -86,33 +104,42 @@ st.markdown("""
         object-fit: contain; 
     }
 
-    /* Regel 2: ZWINGE alles innerhalb einer Kachel (BorderWrapper) in eine Reihe */
-    /* Das betrifft sowohl Bild+Text als auch die Button-Leiste */
-    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
+    /* 2. ZWINGE Kachel-Inhalt in eine Reihe (Bild links, Text rechts) */
+    [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
+        display: flex !important;
         flex-direction: row !important;
         flex-wrap: nowrap !important;
         align-items: start !important;
     }
 
-    /* Regel 3: Spaltenbreiten in der Kachel steuern */
     /* Spalte 1 (Bild): Fix 80px */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
         flex: 0 0 80px !important;
         min-width: 80px !important;
         width: 80px !important;
-        margin-right: 10px !important; /* Abstand zum Text */
+        margin-right: 10px !important;
     }
     
     /* Spalte 2 (Text): Rest */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
-        flex: 1 !important;
+        flex: 1 1 auto !important;
         min-width: 0 !important;
     }
 
-    /* Regel 4: BUTTON SPALTEN ENG ZUSAMMEN */
-    /* Zwingt die Spaltenabstände der Buttons auf fast Null */
+    /* 3. BUTTONS NEBENEINANDER ZWINGEN (Das ist der Fix!) */
+    /* Wir zielen auf alle HorizontalBlocks, die INNERHALB einer Spalte sind (das sind unsere Button-Reihen) */
     [data-testid="column"] [data-testid="stHorizontalBlock"] {
-        gap: 0.3rem !important;
+        display: flex !important;
+        flex-direction: row !important; /* IMMER Reihe */
+        flex-wrap: nowrap !important; /* NIEMALS umbrechen */
+        gap: 5px !important;
+    }
+    
+    /* Die Spalten der Buttons selbst müssen flexibel sein */
+    [data-testid="column"] [data-testid="stHorizontalBlock"] [data-testid="column"] {
+        min-width: 0 !important; /* Erlaubt schrumpfen */
+        flex: 1 !important; /* Jeder Button kriegt gleichen Anteil */
+        width: auto !important;
     }
 
     .status-running { color: #d35400; font-weight: bold; animation: pulse 2s infinite; }
@@ -450,9 +477,15 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 st.write("")
                 for t in book["Tags"].split(","): st.markdown(f'<span class="book-tag">{t.strip()}</span>', unsafe_allow_html=True)
         with c2:
-            st.markdown(f"""<div class="ai-box"><b>📖 Teaser</b><br>{book.get('Teaser', '...')}</div>
-            <div class="ai-box" style="border-left-color: #2980b9; background-color: #eaf2f8; margin-top:10px;">
-                <b>👤 Autor</b><br>{book.get('Bio', '-')}</div>""", unsafe_allow_html=True)
+            # HIER SIND DIE BUNTEN BOXEN WIEDER:
+            st.markdown(f"""
+            <div class="box-teaser">
+                <b>📖 Teaser</b><br>{book.get('Teaser', '...')}
+            </div>
+            <div class="box-author">
+                <b>👤 Autor</b><br>{book.get('Bio', '-')}
+            </div>
+            """, unsafe_allow_html=True)
     with t2:
         new_title = st.text_input("Titel", value=book["Titel"])
         new_author = st.text_input("Autor", value=book["Autor"])
@@ -660,16 +693,13 @@ def main():
             cols = st.columns(3)
             for i, (idx, row) in enumerate(df_filtered.iterrows()):
                 with cols[i % 3]:
-                    # Mit CSS-Klasse "tile-container" für gezieltes Styling
                     with st.container(border=True):
                         # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
                         c_img, c_content = st.columns([1, 2])
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
                         with c_content:
-                            # Wir nutzen HTML Klassen für das Styling
                             st.markdown(f"<span class='tile-title'>{row['Titel']}</span>", unsafe_allow_html=True)
-                            
                             year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
                             st.markdown(f"<span class='tile-meta'>{row['Autor']}{year_disp}</span>", unsafe_allow_html=True)
                             
@@ -680,14 +710,15 @@ def main():
                             
                             teaser_text = row.get("Teaser", "")
                             if teaser_text and len(str(teaser_text)) > 5:
-                                # Teaser Text komplett rendern, CSS schneidet ab
                                 st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
                             else: st.caption("Noch kein Teaser.")
                             
-                            st.write("")
-                            # Buttons - mit Type für Styling
-                            # HIER IST DER TRICK: [1, 1, 1, 5] -> Buttons eng links, Rest leer
+                            # HIER IST DER TRICK: Buttons eng zusammen
+                            # Wir verzichten auf st.write("") spacer um DOM nesting zu vermeiden
+                            # Und nutzen [1,1,1,5] damit sie links kleben
                             b1, b2, b3, _ = st.columns([1, 1, 1, 5], gap="small")
+                            
+                            # WICHTIG: Kein Spacer davor!
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details", type="primary"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
                             if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover", type="secondary"):
