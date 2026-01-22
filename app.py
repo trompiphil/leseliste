@@ -20,28 +20,30 @@ if "active_tab" not in st.session_state: st.session_state.active_tab = NAV_OPTIO
 if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab = NAV_OPTIONS[1]
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 
-# --- CSS DESIGN (THE ENFORCER VERSION) ---
+# --- CSS DESIGN ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
     
-    /* --- BUTTON STYLING --- */
+    /* --- BUTTONS --- */
     .stButton button {
         border-radius: 6px !important;
         border: 1px solid #d35400 !important;
-        font-size: 0.85em !important;
-        padding: 0.2rem 0.1rem !important; /* Minimales Padding */
-        min-height: 0px !important;
-        height: 32px !important; /* Fixe Höhe für Einheitlichkeit */
-        line-height: 1.0 !important;
+        font-size: 0.9em !important;
+        padding: 0px !important; 
+        min-height: 2.2rem !important;
+        height: 2.2rem !important;
         width: 100% !important;
         margin: 0 !important;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
 
     .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; }
-    .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; border-color: #d35400 !important; opacity: 0.6; }
+    .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; border-color: #d35400 !important; opacity: 0.7; }
     .stButton button[kind="secondary"]:hover { background-color: #fcece4 !important; opacity: 1; }
 
     /* --- KACHEL CONTAINER --- */
@@ -50,7 +52,7 @@ st.markdown("""
         border-radius: 12px; 
         border: 1px solid #d35400; 
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1); 
-        padding: 10px; 
+        padding: 10px;
     }
     
     /* Navigation */
@@ -59,8 +61,8 @@ st.markdown("""
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
     
     /* Text Styles */
-    .tile-title { font-weight: bold; font-size: 1.05em; line-height: 1.2; margin-bottom: 2px; display: block; }
-    .tile-meta { font-size: 0.85em; color: #555; margin-bottom: 4px; display: block; }
+    .tile-title { font-weight: bold; font-size: 1.1em; line-height: 1.2; margin-bottom: 2px; display: block; }
+    .tile-meta { font-size: 0.9em; color: #555; margin-bottom: 4px; display: block; }
     .tile-teaser { 
         font-size: 0.85em; 
         color: #444; 
@@ -68,62 +70,51 @@ st.markdown("""
         font-style: italic; 
         line-height: 1.4; 
         display: -webkit-box; 
-        -webkit-line-clamp: 10; /* Mehr Text anzeigen (ca 10 Zeilen) */
+        -webkit-line-clamp: 10; 
         -webkit-box-orient: vertical; 
         overflow: hidden; 
     }
     .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.8em; color: #d35400; font-weight: bold; margin-left: 5px; }
     
-    /* --- MOBILE & DESKTOP LAYOUT ENFORCEMENT --- */
+    /* --- LAYOUT ENFORCER (MOBILE & DESKTOP) --- */
     
-    /* 1. Haupt-Layout in der Kachel (Bild links, Text rechts) */
-    /* Wir zielen auf den ersten horizontalen Block in der Kachel */
-    [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
-        display: flex !important;
-        flex-direction: row !important; /* ZWINGT NEBENEINANDER */
-        gap: 15px !important;
+    /* Regel 1: Bildgröße fixieren */
+    div[data-testid="stImage"] img {
+        width: 80px !important;
+        max-width: 80px !important;
+        height: auto !important;
+        object-fit: contain; 
+    }
+
+    /* Regel 2: ZWINGE alles innerhalb einer Kachel (BorderWrapper) in eine Reihe */
+    /* Das betrifft sowohl Bild+Text als auch die Button-Leiste */
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
         align-items: start !important;
     }
-    
-    /* Spalte 1: Bild (Fixiert) */
+
+    /* Regel 3: Spaltenbreiten in der Kachel steuern */
+    /* Spalte 1 (Bild): Fix 80px */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
-        width: 90px !important;
-        min-width: 90px !important;
-        max-width: 90px !important;
-        flex: 0 0 90px !important;
+        flex: 0 0 80px !important;
+        min-width: 80px !important;
+        width: 80px !important;
+        margin-right: 10px !important; /* Abstand zum Text */
     }
     
-    /* Bilder responsive innerhalb der fixen Spalte */
-    [data-testid="stImage"] img {
-        width: 100% !important;
-        height: auto !important;
-        object-fit: cover;
-        border-radius: 4px;
-    }
-
-    /* Spalte 2: Content (Flexibel) */
+    /* Spalte 2 (Text): Rest */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
-        width: auto !important;
-        flex: 1 1 auto !important; /* Nimmt den Restplatz */
-        min-width: 0 !important; /* Verhindert Overflow */
-    }
-
-    /* 2. Button-Reihe (Innerhalb von Spalte 2) */
-    /* Zwingt die Buttons in eine Zeile, egal wie schmal */
-    [data-testid="column"]:nth-child(2) [data-testid="stHorizontalBlock"] {
-        display: flex !important;
-        flex-direction: row !important;
-        gap: 5px !important; /* Eng zusammen */
-        margin-top: 5px !important;
-    }
-    
-    /* Die Spalten der Buttons selbst */
-    [data-testid="column"]:nth-child(2) [data-testid="stHorizontalBlock"] [data-testid="column"] {
+        flex: 1 !important;
         min-width: 0 !important;
-        flex: 1 !important; /* Alle Buttons gleich breit */
     }
 
-    /* Status Animation */
+    /* Regel 4: BUTTON SPALTEN ENG ZUSAMMEN */
+    /* Zwingt die Spaltenabstände der Buttons auf fast Null */
+    [data-testid="column"] [data-testid="stHorizontalBlock"] {
+        gap: 0.3rem !important;
+    }
+
     .status-running { color: #d35400; font-weight: bold; animation: pulse 2s infinite; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     </style>
@@ -695,7 +686,8 @@ def main():
                             
                             st.write("")
                             # Buttons - mit Type für Styling
-                            b1, b2, b3 = st.columns([1, 1, 1])
+                            # HIER IST DER TRICK: [1, 1, 1, 5] -> Buttons eng links, Rest leer
+                            b1, b2, b3, _ = st.columns([1, 1, 1, 5], gap="small")
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details", type="primary"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
                             if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover", type="secondary"):
