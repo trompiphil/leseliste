@@ -20,18 +20,53 @@ if "active_tab" not in st.session_state: st.session_state.active_tab = NAV_OPTIO
 if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab = NAV_OPTIONS[1]
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 
-# --- CSS DESIGN (MOBILE OPTIMIZED) ---
+# --- CSS DESIGN (MOBILE & BUTTONS) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
-    .stButton button { background-color: #d35400 !important; color: white !important; border-radius: 8px; border: none; font-weight: bold; }
-    .stButton button:hover { background-color: #e67e22 !important; }
     
-    /* Container Styles */
-    [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
-    .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
+    /* --- BUTTON STYLING --- */
+    
+    /* Generelle Button Größe reduzieren */
+    .stButton button {
+        min-height: 0px !important;
+        padding: 0.3rem 0.8rem !important;
+        font-size: 0.9em !important;
+        border-radius: 6px !important;
+        border: 1px solid #d35400 !important;
+    }
+
+    /* PRIMARY Button (Info) - Orange */
+    .stButton button[kind="primary"] {
+        background-color: #d35400 !important; 
+        color: white !important; 
+        font-weight: bold;
+    }
+    
+    /* SECONDARY Buttons (Refresh/Magic) - Dezent */
+    .stButton button[kind="secondary"] {
+        background-color: transparent !important; 
+        color: #d35400 !important; 
+        border: 1px solid #d35400 !important;
+        opacity: 0.8;
+    }
+    .stButton button[kind="secondary"]:hover {
+        background-color: #fcece4 !important;
+        opacity: 1;
+    }
+
+    /* --- LAYOUT OPTIMIERUNG --- */
+    
+    /* Kachel Container */
+    [data-testid="stVerticalBlockBorderWrapper"] > div { 
+        background-color: #eaddcf; 
+        border-radius: 12px; 
+        border: 1px solid #d35400; 
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.1); 
+        padding: 10px; 
+    }
     
     /* Navigation */
     div[role="radiogroup"] { display: flex; flex-direction: row; justify-content: center; gap: 10px; width: 100%; }
@@ -39,28 +74,46 @@ st.markdown("""
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
     
     /* Text Styles */
-    .tile-teaser { font-size: 0.85em; color: #555; margin-top: 5px; font-style: italic; line-height: 1.3; }
+    .tile-teaser { font-size: 0.85em; color: #555; margin-top: 5px; font-style: italic; line-height: 1.2; }
     .problem-book { font-size: 0.8em; color: #c0392b; margin-top: -10px; margin-bottom: 10px; }
-    .year-badge { background-color: #fff8e1; padding: 2px 6px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; display: inline-block; margin-left: 5px; }
+    .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; display: inline-block; margin-left: 5px; }
     
-    /* MOBILE SPEZIAL */
+    /* --- MOBILE FORCE ROW (Der Hack für nebeneinander) --- */
     @media (max-width: 640px) {
-        /* Bilder zwingend klein halten */
+        /* Bildgröße fixieren */
         div[data-testid="stImage"] img {
+            width: 80px !important;
             max-width: 80px !important;
-            height: auto !important;
-            object-fit: contain;
+            height: auto !important; 
+            object-fit: contain; 
         }
-        /* Buttons nebeneinander zwingen */
-        div[data-testid="column"] {
-            min-width: 0 !important;
-            flex: 1 !important;
+        
+        /* ZWINGT Spalten nebeneinander zu bleiben */
+        div[data-testid="stHorizontalBlock"] {
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            gap: 10px !important;
+        }
+        
+        /* Spaltenbreiten anpassen: Bild klein, Text Rest */
+        div[data-testid="column"]:nth-of-type(1) {
+            flex: 0 0 80px !important;
+            min-width: 80px !important;
+        }
+        
+        /* Buttons auf Mobile kompakter */
+        .stButton button {
+            padding: 0.2rem 0.5rem !important;
+            font-size: 0.8em !important;
+        }
+        /* Buttons Nebeneinander erzwingen */
+        div[data-testid="column"] > div[data-testid="stVerticalBlock"] > div > div[data-testid="stHorizontalBlock"] {
+             flex-direction: row !important;
         }
     }
     
-    /* Animation Status */
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     .status-running { color: #d35400; font-weight: bold; animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     </style>
 """, unsafe_allow_html=True)
 
@@ -200,24 +253,24 @@ def update_full_dataframe(ws, new_df):
     force_reload()
     return True
 
-def filter_and_sort_books(df_in, query, sort_by):
-    df = df_in.copy()
+def filter_and_sort_books(df, query, sort_by):
+    df_copy = df.copy()
     if query:
         q = query.lower()
         mask = (
-            df['Titel'].str.lower().str.contains(q, na=False) |
-            df['Autor'].str.lower().str.contains(q, na=False) |
-            df['Tags'].str.lower().str.contains(q, na=False)
+            df_copy['Titel'].str.lower().str.contains(q, na=False) |
+            df_copy['Autor'].str.lower().str.contains(q, na=False) |
+            df_copy['Tags'].str.lower().str.contains(q, na=False)
         )
-        df = df[mask]
+        df_copy = df_copy[mask]
     
     if sort_by == "Autor (A-Z)":
-        df['sort_key_last'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x else "")
-        df = df.sort_values(by=['sort_key_last', 'Titel'], key=lambda col: col.str.lower())
+        df_copy['sort_key'] = df_copy['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x and ' ' in x else str(x).strip())
+        df_copy = df_copy.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
-        df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
+        df_copy = df_copy.sort_values(by='Titel', key=lambda col: col.str.lower())
         
-    return df
+    return df_copy
 
 # --- API HELPERS ---
 def process_genre(raw):
@@ -606,9 +659,11 @@ def main():
             for i, (idx, row) in enumerate(df_filtered.iterrows()):
                 with cols[i % 3]:
                     with st.container(border=True):
+                        # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
                         c_img, c_content = st.columns([1, 2])
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
+                        
                         with c_content:
                             st.write(f"**{row['Titel']}**")
                             year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
@@ -626,12 +681,13 @@ def main():
                             else: st.caption("Noch kein Teaser.")
                             
                             st.write("")
-                            b1, b2, b3 = st.columns([1, 1, 1])
-                            if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details"): 
+                            # Buttons
+                            b1, b2, b3 = st.columns([2, 1, 1])
+                            if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details", type="primary"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
-                            if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover"):
+                            if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover", type="secondary"):
                                 open_cover_gallery(row, ws_books, ws_logs)
-                            if b3.button("✨", key=f"ai_{idx}_{is_wishlist}", help="Refresh"):
+                            if b3.button("✨", key=f"ai_{idx}_{is_wishlist}", help="Refresh", type="secondary"):
                                 with st.spinner("..."):
                                     mod_name = st.session_state.get("selected_model_name", "gemma-3-27b-it")
                                     ai_data, err = fetch_all_ai_data_manual(row["Titel"], row["Autor"], mod_name)
@@ -653,7 +709,7 @@ def main():
                                         except: pass
                             
                             if is_wishlist:
-                                if st.button("✅", key=f"read_{idx}", help="Gelesen"):
+                                if st.button("✅", key=f"read_{idx}", help="Gelesen", type="primary"):
                                     cell = ws_books.find(row["Titel"])
                                     ws_books.update_cell(cell.row, 8, "Gelesen")
                                     ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
