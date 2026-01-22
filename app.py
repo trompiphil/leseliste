@@ -28,7 +28,7 @@ st.markdown("""
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
     
-    /* --- BUTTONS (MINI) FÜR KACHELN --- */
+    /* --- BUTTONS (MINI) --- */
     .stButton button {
         border-radius: 6px !important;
         border: 1px solid #d35400 !important;
@@ -41,12 +41,10 @@ st.markdown("""
         width: 100% !important;
     }
     
-    /* Farben */
     .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; font-weight: bold; }
     .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; opacity: 0.7; }
 
-    /* SIDEBAR BUTTONS SPEZIAL */
-    /* Damit die Sidebar Buttons etwas "luftiger" sind als die Mini-Buttons in den Kacheln */
+    /* SIDEBAR BUTTONS */
     [data-testid="stSidebar"] .stButton button {
         padding: 0.5rem 1rem !important;
         min-height: 2.5rem !important;
@@ -84,11 +82,11 @@ st.markdown("""
     }
     .year-badge { background-color: #fff8e1; padding: 1px 4px; border-radius: 3px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; font-weight: bold; margin-left: 5px; }
     
-    /* Bunte Boxen im Dialog */
+    /* Dialog Boxen */
     .box-teaser { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 10px; border-radius: 4px; margin-bottom: 10px; color: #2c3e50; }
     .box-author { background-color: #eaf2f8; border-left: 4px solid #2980b9; padding: 10px; border-radius: 4px; margin-top: 10px; color: #2c3e50; }
 
-    /* --- MOBILE FORCE ROW --- */
+    /* --- MOBILE FORCE ROW (Layout Enforcer) --- */
     div[data-testid="stImage"] img {
         width: 80px !important;
         max-width: 80px !important;
@@ -96,6 +94,7 @@ st.markdown("""
         object-fit: contain; 
     }
 
+    /* Zwingt Inhalt nebeneinander */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-direction: row !important;
@@ -103,7 +102,7 @@ st.markdown("""
         align-items: start !important;
     }
 
-    /* Spalte 1 (Bild): Fix 80px */
+    /* Spalte 1 (Bild) */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
         flex: 0 0 80px !important;
         min-width: 80px !important;
@@ -111,7 +110,7 @@ st.markdown("""
         margin-right: 12px !important;
     }
     
-    /* Spalte 2 (Text): Rest */
+    /* Spalte 2 (Text) */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
         flex: 1 1 auto !important;
         min-width: 0 !important;
@@ -718,42 +717,47 @@ def main():
                 orig_row = df[df["Titel"] == orig_title].iloc[0]
                 show_book_details(orig_row, ws_books, ws_authors, ws_logs)
         else:
-            cols = st.columns(3)
-            for i, (idx, row) in enumerate(df_filtered.iterrows()):
-                with cols[i % 3]:
-                    # Mit CSS-Klasse "tile-container" für gezieltes Styling
-                    with st.container(border=True):
-                        # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
-                        c_img, c_content = st.columns([1, 2])
-                        with c_img:
-                            st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                        with c_content:
-                            st.markdown(f"<span class='tile-title'>{row['Titel']}</span>", unsafe_allow_html=True)
-                            year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
-                            st.markdown(f"<span class='tile-meta'>{row['Autor']}{year_disp}</span>", unsafe_allow_html=True)
-                            
-                            if not is_wishlist:
-                                try: s_val = int(row['Bewertung'])
-                                except: s_val = 0
-                                if s_val > 0: st.markdown(f"<span style='color:#d35400'>{'★'*s_val}</span>", unsafe_allow_html=True)
-                            
-                            teaser_text = row.get("Teaser", "")
-                            if teaser_text and len(str(teaser_text)) > 5:
-                                st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
-                            else: st.caption("Noch kein Teaser.")
-                            
-                            # --- DER EINZIGE BUTTON FÜR OPTION B ---
-                            # Innerhalb der Textspalte, damit er direkt drunter ist
-                            if st.button("ℹ️ Details", key=f"inf_{idx}_{is_wishlist}", type="primary"): 
-                                show_book_details(row, ws_books, ws_authors, ws_logs)
-                            
-                            if is_wishlist:
-                                if st.button("✅ Gelesen", key=f"read_{idx}", use_container_width=True):
-                                    cell = ws_books.find(row["Titel"])
-                                    ws_books.update_cell(cell.row, 8, "Gelesen")
-                                    ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
-                                    force_reload()
-                                    st.rerun()
+            # --- ROW CHUNKING FIX (Sortierung auch Mobil korrekt) ---
+            # Wir iterieren in 3er Schritten durch die Liste
+            for i in range(0, len(df_filtered), 3):
+                batch = df_filtered.iloc[i:i+3]
+                cols = st.columns(3) # Neue Zeile für jeden Batch
+                
+                for j, (idx, row) in enumerate(batch.iterrows()):
+                    with cols[j]:
+                        # Mit CSS-Klasse "tile-container" für gezieltes Styling
+                        with st.container(border=True):
+                            # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
+                            c_img, c_content = st.columns([1, 2])
+                            with c_img:
+                                st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
+                            with c_content:
+                                st.markdown(f"<span class='tile-title'>{row['Titel']}</span>", unsafe_allow_html=True)
+                                year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
+                                st.markdown(f"<span class='tile-meta'>{row['Autor']}{year_disp}</span>", unsafe_allow_html=True)
+                                
+                                if not is_wishlist:
+                                    try: s_val = int(row['Bewertung'])
+                                    except: s_val = 0
+                                    if s_val > 0: st.markdown(f"<span style='color:#d35400'>{'★'*s_val}</span>", unsafe_allow_html=True)
+                                
+                                teaser_text = row.get("Teaser", "")
+                                if teaser_text and len(str(teaser_text)) > 5:
+                                    st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
+                                else: st.caption("Noch kein Teaser.")
+                                
+                                # --- DER EINZIGE BUTTON FÜR OPTION B ---
+                                # Innerhalb der Textspalte, damit er direkt drunter ist
+                                if st.button("ℹ️ Details", key=f"inf_{idx}_{is_wishlist}", type="primary"): 
+                                    show_book_details(row, ws_books, ws_authors, ws_logs)
+                                
+                                if is_wishlist:
+                                    if st.button("✅ Gelesen", key=f"read_{idx}", use_container_width=True):
+                                        cell = ws_books.find(row["Titel"])
+                                        ws_books.update_cell(cell.row, 8, "Gelesen")
+                                        ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
+                                        force_reload()
+                                        st.rerun()
 
     if st.session_state.active_tab == "🔍 Sammlung":
         df_s = df[df["Status"] == "Gelesen"].copy()
