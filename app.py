@@ -20,110 +20,97 @@ if "active_tab" not in st.session_state: st.session_state.active_tab = NAV_OPTIO
 if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab = NAV_OPTIONS[1]
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 
-# --- CSS DESIGN (RESPONSIVE MASTERPIECE) ---
+# --- CSS DESIGN (MOBILE FORCE ROW) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
     
-    /* --- BUTTON STYLING (DEZENTER) --- */
-    
+    /* --- BUTTONS --- */
     .stButton button {
         border-radius: 6px !important;
         border: 1px solid #d35400 !important;
-        font-size: 0.85em !important;
-        padding: 0.25rem 0.5rem !important; /* Weniger Padding -> kleiner */
+        font-size: 0.8em !important;
+        padding: 0.2rem 0.4rem !important; /* Sehr kompakt */
         min-height: 0px !important;
-        line-height: 1.2 !important;
+        line-height: 1.0 !important;
+        margin: 0px !important;
+        width: 100%; /* Füllt die Spalte */
     }
 
-    /* Primary (Info) - Orange */
-    .stButton button[kind="primary"] {
-        background-color: #d35400 !important; 
-        color: white !important; 
-    }
-    
-    /* Secondary (Refresh/Magic) - Transparent & Dezent */
-    .stButton button[kind="secondary"] {
-        background-color: transparent !important; 
-        color: #d35400 !important; 
-        border-color: #e0e0e0 !important; /* Heller Rahmen im Ruhezustand */
-        opacity: 0.7;
-    }
-    .stButton button[kind="secondary"]:hover {
-        background-color: #fcece4 !important;
-        border-color: #d35400 !important;
-        opacity: 1;
-        color: #d35400 !important;
-    }
+    .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; }
+    .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; border-color: #d35400 !important; opacity: 0.7; }
+    .stButton button[kind="secondary"]:hover { background-color: #fcece4 !important; opacity: 1; }
 
-    /* --- LAYOUTS --- */
-    
-    /* Kachel Container */
+    /* --- KACHEL CONTAINER --- */
     [data-testid="stVerticalBlockBorderWrapper"] > div { 
         background-color: #eaddcf; 
         border-radius: 12px; 
         border: 1px solid #d35400; 
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1); 
-        padding: 10px; 
+        padding: 8px; /* Weniger Padding für Mobile */
     }
     
     /* Navigation */
-    div[role="radiogroup"] { display: flex; flex-direction: row; justify-content: center; gap: 10px; width: 100%; }
-    div[role="radiogroup"] label { background-color: #eaddcf; padding: 10px 20px; border-radius: 8px; border: 1px solid #d35400; cursor: pointer; font-weight: bold; color: #4a3b2a !important; }
+    div[role="radiogroup"] { display: flex; flex-direction: row; justify-content: center; gap: 5px; width: 100%; flex-wrap: wrap; }
+    div[role="radiogroup"] label { background-color: #eaddcf; padding: 5px 15px; border-radius: 8px; border: 1px solid #d35400; cursor: pointer; font-weight: bold; color: #4a3b2a !important; font-size: 0.9em; }
     div[role="radiogroup"] label[data-checked="true"] { background-color: #d35400 !important; color: white !important; }
     
     /* Text Styles */
-    .tile-teaser { font-size: 0.85em; color: #555; margin-top: 5px; font-style: italic; line-height: 1.2; }
+    .tile-title { font-weight: bold; font-size: 1.0em; line-height: 1.2; margin-bottom: 2px; }
+    .tile-author { font-size: 0.85em; color: #555; margin-bottom: 5px; }
+    .tile-teaser { font-size: 0.8em; color: #666; margin-top: 5px; font-style: italic; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
     .problem-book { font-size: 0.8em; color: #c0392b; margin-top: -10px; margin-bottom: 10px; }
-    .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; display: inline-block; margin-left: 5px; }
+    .year-badge { background-color: #fff8e1; padding: 1px 4px; border-radius: 3px; border: 1px solid #d35400; font-size: 0.7em; color: #d35400; display: inline-block; vertical-align: middle; margin-left: 4px; }
     
-    /* --- MOBILE OPTIMIERUNG (DER FIX) --- */
-    @media (max-width: 640px) {
-        
-        /* 1. Bildgröße fixieren auf 80px */
-        div[data-testid="stImage"] img {
-            width: 80px !important;
-            max-width: 80px !important;
-            height: auto !important; 
-            object-fit: contain; 
-        }
-        
-        /* 2. DAS LAYOUT INNERHALB DER KACHEL (Bild | Text) */
-        /* Wir zwingen NUR die Spalten innerhalb eines Containers mit Border (die Kachel) in eine Reihe */
-        [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
-            flex-direction: row !important;
-            gap: 10px !important;
-            align-items: start !important;
-        }
-        
-        /* Spalte 1 (Bild) fixieren */
-        [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
-            flex: 0 0 80px !important;
-            min-width: 80px !important;
-            width: 80px !important;
-        }
-        
-        /* Spalte 2 (Text) nimmt den Rest */
-        [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
-            flex: 1 !important;
-            min-width: 0 !important;
-        }
-
-        /* 3. BUTTONS NEBENEINANDER ZWINGEN */
-        /* Die Buttons sind eine tiefere Ebene im rechten Block. Auch die müssen Row bleiben. */
-        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
-             flex-direction: row !important;
-        }
-        
-        /* Buttons etwas kleiner auf Mobile */
-        .stButton button {
-            padding: 0.1rem 0.4rem !important;
-            font-size: 0.8em !important;
-        }
+    /* --- MOBILE FORCE ROW HACK --- */
+    /* Dies verhindert, dass Spalten auf dem Handy untereinander rutschen */
+    
+    /* 1. Haupt-Container (Bild links, Text rechts) */
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
+        flex-direction: row !important; 
+        flex-wrap: nowrap !important;
+        align-items: flex-start !important;
+        gap: 10px !important;
     }
     
+    /* 2. Spaltenbreiten erzwingen */
+    /* Bild-Spalte */
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="column"]:nth-of-type(1) {
+        flex: 0 0 70px !important; /* Fest 70px */
+        min-width: 70px !important;
+        max-width: 70px !important;
+    }
+    /* Bild selbst */
+    [data-testid="stImage"] img {
+        width: 100% !important;
+        object-fit: cover !important;
+        border-radius: 4px;
+    }
+    
+    /* Text-Spalte */
+    [data-testid="stVerticalBlockBorderWrapper"] [data-testid="column"]:nth-of-type(2) {
+        flex: 1 !important; /* Nimmt den Rest */
+        min-width: 0 !important; /* Verhindert Overflow */
+    }
+
+    /* 3. BUTTON REIHE (Das nested horizontal block) */
+    /* Wir müssen hier tiefer selektieren, damit die Buttons nebeneinander bleiben */
+    /* Die Buttons sind im 2. Column -> Vertical Block -> Horizontal Block */
+    [data-testid="column"]:nth-of-type(2) [data-testid="stHorizontalBlock"] {
+        flex-direction: row !important;
+        gap: 5px !important;
+        margin-top: 5px !important;
+    }
+    
+    /* Die Button Spalten selbst */
+    [data-testid="column"]:nth-of-type(2) [data-testid="stHorizontalBlock"] [data-testid="column"] {
+        flex: 0 0 auto !important; /* Nur so breit wie nötig */
+        min-width: auto !important;
+        width: auto !important;
+    }
+
     .status-running { color: #d35400; font-weight: bold; animation: pulse 2s infinite; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     </style>
@@ -275,7 +262,6 @@ def filter_and_sort_books(df_in, query, sort_by):
             df['Tags'].str.lower().str.contains(q, na=False)
         )
         df = df[mask]
-    
     if sort_by == "Autor (A-Z)":
         df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x else "")
         df = df.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
@@ -669,6 +655,7 @@ def main():
             cols = st.columns(3)
             for i, (idx, row) in enumerate(df_filtered.iterrows()):
                 with cols[i % 3]:
+                    # Mit CSS-Klasse "tile-container" für gezieltes Styling
                     with st.container(border=True):
                         # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
                         c_img, c_content = st.columns([1, 2])
@@ -691,7 +678,7 @@ def main():
                             else: st.caption("Noch kein Teaser.")
                             
                             st.write("")
-                            # Buttons - mit Type für Styling
+                            # Buttons
                             b1, b2, b3 = st.columns([1, 1, 1])
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details", type="primary"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
