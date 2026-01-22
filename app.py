@@ -12,7 +12,7 @@ import re
 import threading
 
 # --- KONFIGURATION ---
-st.set_page_config(page_title="Franzi's Leseliste ❤️", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Meine Leseliste", page_icon="📚", layout="wide")
 
 # --- STATE INIT ---
 NAV_OPTIONS = ["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"]
@@ -21,29 +21,37 @@ if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab =
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 if "bg_message" not in st.session_state: st.session_state.bg_message = None
 
-# --- CSS DESIGN (COMPACT TILE) ---
+# --- CSS DESIGN ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
     
-    /* --- BUTTONS (MINI) --- */
+    /* --- BUTTONS (MINI) FÜR KACHELN --- */
     .stButton button {
         border-radius: 6px !important;
         border: 1px solid #d35400 !important;
-        font-size: 0.8rem !important; /* Kleinere Schrift */
-        padding: 2px 8px !important;   /* Minimales Padding */
+        font-size: 0.8rem !important; 
+        padding: 2px 8px !important;   
         min-height: 0px !important;
-        height: auto !important;       /* Nur so hoch wie nötig */
+        height: auto !important;       
         line-height: 1.2 !important;
         margin-top: 5px !important;
-        width: 100% !important;        /* Füllt die Textspalte, nicht den Screen */
+        width: 100% !important;
     }
     
     /* Farben */
-    .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; font-weight: normal; }
+    .stButton button[kind="primary"] { background-color: #d35400 !important; color: white !important; font-weight: bold; }
     .stButton button[kind="secondary"] { background-color: transparent !important; color: #d35400 !important; opacity: 0.7; }
+
+    /* SIDEBAR BUTTONS SPEZIAL */
+    /* Damit die Sidebar Buttons etwas "luftiger" sind als die Mini-Buttons in den Kacheln */
+    [data-testid="stSidebar"] .stButton button {
+        padding: 0.5rem 1rem !important;
+        min-height: 2.5rem !important;
+        margin-top: 0px !important;
+    }
 
     /* --- KACHEL CONTAINER --- */
     [data-testid="stVerticalBlockBorderWrapper"] > div { 
@@ -70,7 +78,7 @@ st.markdown("""
         font-style: italic; 
         line-height: 1.3; 
         display: -webkit-box; 
-        -webkit-line-clamp: 7; /* Max 7 Zeilen Teaser */
+        -webkit-line-clamp: 7; 
         -webkit-box-orient: vertical; 
         overflow: hidden; 
     }
@@ -554,7 +562,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
 
 # --- MAIN ---
 def main():
-    st.title("Franzi's Leseliste ❤️")
+    st.title("Meine Leseliste")
     
     # Cleanup old session states on load
     if "gallery_images" in st.session_state: del st.session_state.gallery_images
@@ -575,8 +583,33 @@ def main():
     
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
-        st.markdown(f"🔗 [**📂 Tabelle öffnen**](https://docs.google.com/spreadsheets/d/{sh.id})")
         
+        # 1. KI UPDATE (GANZ OBEN)
+        missing_count = 0
+        missing_indices = []
+        if not df.empty:
+            for i, r in df.iterrows():
+                teaser = str(r.get("Teaser", ""))
+                is_error = "Fehler" in teaser or "Keine automatischen" in teaser or "Formatierungsfehler" in teaser
+                if len(teaser) < 5 or is_error:
+                    missing_count += 1
+                    missing_indices.append(i)
+                    
+        st.write("🤖 **KI-Update**")
+        if missing_count > 0:
+            st.warning(f"{missing_count} Bücher offen.")
+            if st.button("✨ Infos laden", type="primary", use_container_width=True):
+                # Background Worker
+                if not 'selected_model_name' in st.session_state: st.session_state.selected_model_name = "gemma-3-27b-it" # Fallback
+                t = threading.Thread(target=background_update_task, args=(missing_indices, df.copy(), st.session_state.selected_model_name, ws_books, ws_logs), name="BackgroundUpdater")
+                t.start()
+                st.session_state.background_status = "running"
+                st.toast("Hintergrund-Update gestartet!")
+                time.sleep(0.5)
+                st.rerun()
+        else:
+            st.success("Alles aktuell.")
+
         # STATUS CHECK FOR BACKGROUND WORKER
         if st.session_state.background_status == "running":
             st.markdown("<div class='status-running'>🔄 Hintergrund-Update läuft...</div>", unsafe_allow_html=True)
@@ -587,16 +620,23 @@ def main():
                 force_reload()
                 st.rerun()
         
-        # TOAST ANZEIGEN WENN FERTIG
         if st.session_state.bg_message:
             st.toast(st.session_state.bg_message)
             st.session_state.bg_message = None
 
-        if st.button("🔄 Cache leeren"): force_reload(); st.rerun()
-        if st.button("🛠️ Schreibtest"):
+        st.markdown("---")
+        
+        # 2. VERWALTUNG (OPTISCH ANGEGLICHEN)
+        st.write("⚙️ **Verwaltung**")
+        st.link_button("📂 Tabelle öffnen", f"https://docs.google.com/spreadsheets/d/{sh.id}", use_container_width=True)
+        st.button("🔄 Cache leeren", use_container_width=True, on_click=lambda: (force_reload(), st.rerun()))
+        if st.button("🛠️ Schreibtest", use_container_width=True):
             try: ws_logs.update_cell(1, 3, "TEST_OK"); log_to_sheet(ws_logs, "Test", "DEBUG"); st.success("Erfolg!")
             except Exception as e: st.error(f"Fehler: {e}")
+            
         st.markdown("---")
+        
+        # 3. MODELL (GANZ UNTEN)
         if "available_models_list" not in st.session_state:
             with st.spinner("Lade Modelle..."):
                 if "gemini_api_key" in st.secrets: st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
@@ -612,31 +652,6 @@ def main():
         selected_model = st.selectbox("🧠 KI-Modell", models, index=default_idx if models else None)
         st.session_state.selected_model_name = selected_model
         
-        st.markdown("---")
-        st.write("🤖 **KI-Update**")
-        missing_count = 0
-        missing_indices = []
-        if not df.empty:
-            for i, r in df.iterrows():
-                teaser = str(r.get("Teaser", ""))
-                is_error = "Fehler" in teaser or "Keine automatischen" in teaser or "Formatierungsfehler" in teaser
-                if len(teaser) < 5 or is_error:
-                    missing_count += 1
-                    missing_indices.append(i)
-        
-        if missing_count > 0:
-            st.info(f"{missing_count} Bücher offen.")
-            if missing_count < 10:
-                for idx in missing_indices: st.markdown(f"<div class='problem-book'>• {df.loc[idx]['Titel']}</div>", unsafe_allow_html=True)
-            if st.button("✨ Infos laden (Hintergrund)"):
-                if not selected_model: st.error("Kein Modell!"); st.stop()
-                t = threading.Thread(target=background_update_task, args=(missing_indices, df.copy(), selected_model, ws_books, ws_logs), name="BackgroundUpdater")
-                t.start()
-                st.session_state.background_status = "running"
-                st.toast("Hintergrund-Update gestartet!")
-                time.sleep(0.5)
-                st.rerun()
-        else: st.success("Alles aktuell.")
         with st.expander("📜 System-Log", expanded=False):
             try:
                 logs = ws_logs.get_all_values()
