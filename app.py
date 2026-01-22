@@ -51,8 +51,11 @@ st.markdown("""
             height: auto !important;
             object-fit: contain;
         }
-        /* Versuch, Platzverschwendung zu reduzieren */
-        .block-container { padding-top: 2rem !important; }
+        /* Buttons nebeneinander zwingen */
+        div[data-testid="column"] {
+            min-width: 0 !important;
+            flex: 1 !important;
+        }
     }
     
     /* Animation Status */
@@ -90,6 +93,19 @@ def log_to_sheet(ws_logs, message, msg_type="INFO"):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ws_logs.insert_row([ts, msg_type, str(message)], index=2)
     except Exception: pass
+
+def check_structure(ws):
+    if "structure_checked" in st.session_state: return
+    try:
+        head = ws.row_values(1)
+        if not head: ws.update_cell(1,1,"Titel"); head=["Titel"]
+        needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio"]
+        next_c = len(head)+1
+        for n in needed:
+            if not any(h.lower()==n.lower() for h in head):
+                ws.update_cell(1, next_c, n); next_c+=1; time.sleep(0.5)
+        st.session_state.structure_checked = True
+    except: pass
 
 # --- DATA ---
 def get_data_fresh(ws):
@@ -186,7 +202,6 @@ def update_full_dataframe(ws, new_df):
 
 def filter_and_sort_books(df_in, query, sort_by):
     df = df_in.copy()
-    # 1. Filtern
     if query:
         q = query.lower()
         mask = (
@@ -196,12 +211,9 @@ def filter_and_sort_books(df_in, query, sort_by):
         )
         df = df[mask]
     
-    # 2. Sortieren (Nachname Logic)
     if sort_by == "Autor (A-Z)":
-        # Nimmt das letzte Wort als Nachnamen, falls vorhanden
-        df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x and ' ' in x else str(x).strip())
-        # Sortiere erst nach Nachname, dann nach Titel (für Konsistenz)
-        df = df.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
+        df['sort_key_last'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x else "")
+        df = df.sort_values(by=['sort_key_last', 'Titel'], key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
         
@@ -483,7 +495,6 @@ def main():
         if st.button("🛠️ Schreibtest"):
             try: ws_logs.update_cell(1, 3, "TEST_OK"); log_to_sheet(ws_logs, "Test", "DEBUG"); st.success("Erfolg!")
             except Exception as e: st.error(f"Fehler: {e}")
-        
         st.markdown("---")
         if "available_models_list" not in st.session_state:
             with st.spinner("Lade Modelle..."):
@@ -614,7 +625,6 @@ def main():
                                 st.markdown(f"<div class='tile-teaser'>{short_teaser}</div>", unsafe_allow_html=True)
                             else: st.caption("Noch kein Teaser.")
                             
-                            # BUTTONS
                             st.write("")
                             b1, b2, b3 = st.columns([1, 1, 1])
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details"): 
