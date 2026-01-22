@@ -20,44 +20,45 @@ if "active_tab" not in st.session_state: st.session_state.active_tab = NAV_OPTIO
 if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab = NAV_OPTIONS[1]
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 
-# --- CSS DESIGN (MOBILE & BUTTONS) ---
+# --- CSS DESIGN (RESPONSIVE MASTERPIECE) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
     
-    /* --- BUTTON STYLING --- */
+    /* --- BUTTON STYLING (DEZENTER) --- */
     
-    /* Generelle Button Größe reduzieren */
     .stButton button {
-        min-height: 0px !important;
-        padding: 0.3rem 0.8rem !important;
-        font-size: 0.9em !important;
         border-radius: 6px !important;
         border: 1px solid #d35400 !important;
+        font-size: 0.85em !important;
+        padding: 0.25rem 0.5rem !important; /* Weniger Padding -> kleiner */
+        min-height: 0px !important;
+        line-height: 1.2 !important;
     }
 
-    /* PRIMARY Button (Info) - Orange */
+    /* Primary (Info) - Orange */
     .stButton button[kind="primary"] {
         background-color: #d35400 !important; 
         color: white !important; 
-        font-weight: bold;
     }
     
-    /* SECONDARY Buttons (Refresh/Magic) - Dezent */
+    /* Secondary (Refresh/Magic) - Transparent & Dezent */
     .stButton button[kind="secondary"] {
         background-color: transparent !important; 
         color: #d35400 !important; 
-        border: 1px solid #d35400 !important;
-        opacity: 0.8;
+        border-color: #e0e0e0 !important; /* Heller Rahmen im Ruhezustand */
+        opacity: 0.7;
     }
     .stButton button[kind="secondary"]:hover {
         background-color: #fcece4 !important;
+        border-color: #d35400 !important;
         opacity: 1;
+        color: #d35400 !important;
     }
 
-    /* --- LAYOUT OPTIMIERUNG --- */
+    /* --- LAYOUTS --- */
     
     /* Kachel Container */
     [data-testid="stVerticalBlockBorderWrapper"] > div { 
@@ -78,9 +79,10 @@ st.markdown("""
     .problem-book { font-size: 0.8em; color: #c0392b; margin-top: -10px; margin-bottom: 10px; }
     .year-badge { background-color: #fff8e1; padding: 1px 5px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; display: inline-block; margin-left: 5px; }
     
-    /* --- MOBILE FORCE ROW (Der Hack für nebeneinander) --- */
+    /* --- MOBILE OPTIMIERUNG (DER FIX) --- */
     @media (max-width: 640px) {
-        /* Bildgröße fixieren */
+        
+        /* 1. Bildgröße fixieren auf 80px */
         div[data-testid="stImage"] img {
             width: 80px !important;
             max-width: 80px !important;
@@ -88,27 +90,37 @@ st.markdown("""
             object-fit: contain; 
         }
         
-        /* ZWINGT Spalten nebeneinander zu bleiben */
-        div[data-testid="stHorizontalBlock"] {
+        /* 2. DAS LAYOUT INNERHALB DER KACHEL (Bild | Text) */
+        /* Wir zwingen NUR die Spalten innerhalb eines Containers mit Border (die Kachel) in eine Reihe */
+        [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
             flex-direction: row !important;
-            flex-wrap: nowrap !important;
             gap: 10px !important;
+            align-items: start !important;
         }
         
-        /* Spaltenbreiten anpassen: Bild klein, Text Rest */
-        div[data-testid="column"]:nth-of-type(1) {
+        /* Spalte 1 (Bild) fixieren */
+        [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
             flex: 0 0 80px !important;
             min-width: 80px !important;
+            width: 80px !important;
         }
         
-        /* Buttons auf Mobile kompakter */
-        .stButton button {
-            padding: 0.2rem 0.5rem !important;
-            font-size: 0.8em !important;
+        /* Spalte 2 (Text) nimmt den Rest */
+        [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
+            flex: 1 !important;
+            min-width: 0 !important;
         }
-        /* Buttons Nebeneinander erzwingen */
-        div[data-testid="column"] > div[data-testid="stVerticalBlock"] > div > div[data-testid="stHorizontalBlock"] {
+
+        /* 3. BUTTONS NEBENEINANDER ZWINGEN */
+        /* Die Buttons sind eine tiefere Ebene im rechten Block. Auch die müssen Row bleiben. */
+        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stHorizontalBlock"] {
              flex-direction: row !important;
+        }
+        
+        /* Buttons etwas kleiner auf Mobile */
+        .stButton button {
+            padding: 0.1rem 0.4rem !important;
+            font-size: 0.8em !important;
         }
     }
     
@@ -253,24 +265,23 @@ def update_full_dataframe(ws, new_df):
     force_reload()
     return True
 
-def filter_and_sort_books(df, query, sort_by):
-    df_copy = df.copy()
+def filter_and_sort_books(df_in, query, sort_by):
+    df = df_in.copy()
     if query:
         q = query.lower()
         mask = (
-            df_copy['Titel'].str.lower().str.contains(q, na=False) |
-            df_copy['Autor'].str.lower().str.contains(q, na=False) |
-            df_copy['Tags'].str.lower().str.contains(q, na=False)
+            df['Titel'].str.lower().str.contains(q, na=False) |
+            df['Autor'].str.lower().str.contains(q, na=False) |
+            df['Tags'].str.lower().str.contains(q, na=False)
         )
-        df_copy = df_copy[mask]
+        df = df[mask]
     
     if sort_by == "Autor (A-Z)":
-        df_copy['sort_key'] = df_copy['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x and ' ' in x else str(x).strip())
-        df_copy = df_copy.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
+        df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x else "")
+        df = df.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
-        df_copy = df_copy.sort_values(by='Titel', key=lambda col: col.str.lower())
-        
-    return df_copy
+        df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
+    return df
 
 # --- API HELPERS ---
 def process_genre(raw):
@@ -663,7 +674,6 @@ def main():
                         c_img, c_content = st.columns([1, 2])
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                        
                         with c_content:
                             st.write(f"**{row['Titel']}**")
                             year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
@@ -681,8 +691,8 @@ def main():
                             else: st.caption("Noch kein Teaser.")
                             
                             st.write("")
-                            # Buttons
-                            b1, b2, b3 = st.columns([2, 1, 1])
+                            # Buttons - mit Type für Styling
+                            b1, b2, b3 = st.columns([1, 1, 1])
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details", type="primary"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
                             if b2.button("🔄", key=f"upd_{idx}_{is_wishlist}", help="Cover", type="secondary"):
