@@ -18,8 +18,6 @@ st.set_page_config(page_title="Meine Bibliothek", page_icon="📚", layout="wide
 NAV_OPTIONS = ["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"]
 if "active_tab" not in st.session_state: st.session_state.active_tab = NAV_OPTIONS[1]
 if st.session_state.active_tab not in NAV_OPTIONS: st.session_state.active_tab = NAV_OPTIONS[1]
-
-# Globaler Status für Background Worker
 if "background_status" not in st.session_state: st.session_state.background_status = "idle"
 
 # --- CSS DESIGN (MOBILE OPTIMIZED) ---
@@ -28,12 +26,10 @@ st.markdown("""
     .stApp { background-color: #f5f5dc !important; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, li, textarea, input, a { color: #2c3e50 !important; }
     .stTextInput input, .stTextArea textarea { background-color: #fffaf0 !important; border: 2px solid #d35400 !important; color: #000000 !important; }
-    
-    /* Buttons */
     .stButton button { background-color: #d35400 !important; color: white !important; border-radius: 8px; border: none; font-weight: bold; }
     .stButton button:hover { background-color: #e67e22 !important; }
     
-    /* Cards / Kacheln */
+    /* Container Styles */
     [data-testid="stVerticalBlockBorderWrapper"] > div { background-color: #eaddcf; border-radius: 12px; border: 1px solid #d35400; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); padding: 10px; }
     .ai-box { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 15px; border-radius: 5px; margin-bottom: 15px; }
     
@@ -45,23 +41,21 @@ st.markdown("""
     /* Text Styles */
     .tile-teaser { font-size: 0.85em; color: #555; margin-top: 5px; font-style: italic; line-height: 1.3; }
     .problem-book { font-size: 0.8em; color: #c0392b; margin-top: -10px; margin-bottom: 10px; }
-    .year-badge { background-color: #fff8e1; padding: 2px 6px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; display: inline-block; margin-top: 2px; }
+    .year-badge { background-color: #fff8e1; padding: 2px 6px; border-radius: 4px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; display: inline-block; margin-left: 5px; }
     
-    /* MOBILE OPTIMIERUNG */
-    /* Auf kleinen Screens (Handy) Bilder kleiner machen */
+    /* MOBILE SPEZIAL */
     @media (max-width: 640px) {
-        div[data-testid="stImage"] > img {
-            max-width: 90px !important; /* Bild klein zwingen */
+        /* Bilder zwingend klein halten */
+        div[data-testid="stImage"] img {
+            max-width: 80px !important;
+            height: auto !important;
             object-fit: contain;
-            margin-bottom: 5px;
         }
-        /* Versuch, die Buttons nebeneinander zu halten auf Mobile */
-        div[data-testid="column"] {
-            min-width: 0 !important;
-        }
+        /* Versuch, Platzverschwendung zu reduzieren */
+        .block-container { padding-top: 2rem !important; }
     }
     
-    /* Animation für Status */
+    /* Animation Status */
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     .status-running { color: #d35400; font-weight: bold; animation: pulse 2s infinite; }
     </style>
@@ -81,6 +75,7 @@ def get_connection():
     return None
 
 def setup_sheets(client):
+    if not client: return None, None, None, None
     try: sh = client.open("Bücherliste") 
     except: st.error("Fehler: Tabelle 'Bücherliste' nicht gefunden."); st.stop()
     ws_books = sh.sheet1
@@ -191,6 +186,7 @@ def update_full_dataframe(ws, new_df):
 
 def filter_and_sort_books(df_in, query, sort_by):
     df = df_in.copy()
+    # 1. Filtern
     if query:
         q = query.lower()
         mask = (
@@ -200,12 +196,15 @@ def filter_and_sort_books(df_in, query, sort_by):
         )
         df = df[mask]
     
+    # 2. Sortieren (Nachname Logic)
     if sort_by == "Autor (A-Z)":
-        # Sortier-Logik: Erst Nachname, dann Titel (für stabile Ordnung)
-        df['sort_key_last'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x else "")
-        df = df.sort_values(by=['sort_key_last', 'Titel'], key=lambda col: col.str.lower())
+        # Nimmt das letzte Wort als Nachnamen, falls vorhanden
+        df['sort_key'] = df['Autor'].apply(lambda x: str(x).strip().split(' ')[-1] if x and ' ' in x else str(x).strip())
+        # Sortiere erst nach Nachname, dann nach Titel (für Konsistenz)
+        df = df.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
+        
     return df
 
 # --- API HELPERS ---
@@ -458,7 +457,14 @@ def main():
     
     client = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
-    sh, ws_books, ws_logs, ws_authors = setup_sheets(client)
+    
+    # SETUP SHEETS WITH ROBUST UNPACKING
+    sheets_res = setup_sheets(client)
+    if not sheets_res or not sheets_res[0]:
+        st.error("Fehler bei der Verbindung zu Google Sheets.")
+        st.stop()
+        
+    sh, ws_books, ws_logs, ws_authors = sheets_res
     check_structure(ws_books)
     df = get_data(ws_books)
     authors = list(set([a for i, row in df.iterrows() if row["Status"] != "Wunschliste" for a in [row["Autor"]] if a]))
@@ -477,6 +483,7 @@ def main():
         if st.button("🛠️ Schreibtest"):
             try: ws_logs.update_cell(1, 3, "TEST_OK"); log_to_sheet(ws_logs, "Test", "DEBUG"); st.success("Erfolg!")
             except Exception as e: st.error(f"Fehler: {e}")
+        
         st.markdown("---")
         if "available_models_list" not in st.session_state:
             with st.spinner("Lade Modelle..."):
@@ -588,11 +595,9 @@ def main():
             for i, (idx, row) in enumerate(df_filtered.iterrows()):
                 with cols[i % 3]:
                     with st.container(border=True):
-                        # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
                         c_img, c_content = st.columns([1, 2])
                         with c_img:
                             st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
-                        
                         with c_content:
                             st.write(f"**{row['Titel']}**")
                             year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
@@ -607,9 +612,10 @@ def main():
                             if teaser_text and len(str(teaser_text)) > 5:
                                 short_teaser = str(teaser_text)[:150] + "..." if len(str(teaser_text)) > 150 else str(teaser_text)
                                 st.markdown(f"<div class='tile-teaser'>{short_teaser}</div>", unsafe_allow_html=True)
+                            else: st.caption("Noch kein Teaser.")
                             
-                            # BUTTONS RECHTS UNTER DEM TEXT
-                            st.write("") # Spacer
+                            # BUTTONS
+                            st.write("")
                             b1, b2, b3 = st.columns([1, 1, 1])
                             if b1.button("ℹ️", key=f"inf_{idx}_{is_wishlist}", help="Details"): 
                                 show_book_details(row, ws_books, ws_authors, ws_logs)
@@ -637,7 +643,7 @@ def main():
                                         except: pass
                             
                             if is_wishlist:
-                                if st.button("✅ Gelesen", key=f"read_{idx}"):
+                                if st.button("✅", key=f"read_{idx}", help="Gelesen"):
                                     cell = ws_books.find(row["Titel"])
                                     ws_books.update_cell(cell.row, 8, "Gelesen")
                                     ws_books.update_cell(cell.row, 6, datetime.now().strftime("%Y-%m-%d"))
