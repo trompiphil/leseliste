@@ -10,7 +10,7 @@ from deep_translator import GoogleTranslator
 import json
 import re
 import threading
-import wikipedia  # NEU: Das Wikipedia Modul
+import wikipedia
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Leseliste", page_icon="📚", layout="wide")
@@ -106,7 +106,6 @@ st.markdown("""
         align-items: start !important;
     }
 
-    /* Spalte 1 (Bild) */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(1) {
         flex: 0 0 80px !important;
         min-width: 80px !important;
@@ -114,7 +113,6 @@ st.markdown("""
         margin-right: 12px !important;
     }
     
-    /* Spalte 2 (Text) */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:nth-child(2) {
         flex: 1 1 auto !important;
         min-width: 0 !important;
@@ -294,7 +292,6 @@ def process_genre(raw):
     try: return "Roman" if "römisch" in GoogleTranslator(source='auto', target='de').translate(raw).lower() else raw
     except: return "Roman"
 
-# Engine 1: Google Books & Open Library (Bilder & Basis-Text)
 def fetch_cover_candidates_loose(titel, autor, ws_logs=None):
     candidates = [] 
     try:
@@ -337,7 +334,7 @@ def get_wiki_info(titel, autor):
         results = wikipedia.search(search_query)
         if not results: return ""
         page = wikipedia.page(results[0])
-        return page.content[:3000] # Erste 3000 Zeichen (Intro + Plot meistens)
+        return page.content[:3000] 
     except: return ""
 
 def get_google_books_description(titel, autor):
@@ -350,7 +347,7 @@ def get_google_books_description(titel, autor):
     except: return ""
     return ""
 
-# --- AI CORE (Engine 3: Processing) ---
+# --- AI CORE (Engine 3: Processing & Retry) ---
 @st.cache_data(show_spinner=False)
 def get_available_models(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -369,26 +366,36 @@ def call_ai_manual(prompt, model_name):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200:
-            try:
-                res = response.json()
-                txt = res['candidates'][0]['content']['parts'][0]['text']
-                match = re.search(r'\{[\s\S]*\}', txt)
-                if match: return match.group(0), None
-                return txt, None
-            except: return None, "Parse Fehler"
-        elif response.status_code == 429: return None, "RATE_LIMIT"
-        else: return None, f"Fehler {response.status_code}"
-    except Exception as e: return None, str(e)
+    
+    # RETRY LOGIC FÜR 503 FEHLER
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, headers=headers, json=data)
+            if response.status_code == 200:
+                try:
+                    res = response.json()
+                    txt = res['candidates'][0]['content']['parts'][0]['text']
+                    match = re.search(r'\{[\s\S]*\}', txt)
+                    if match: return match.group(0), None
+                    return txt, None
+                except: return None, "Parse Fehler"
+            elif response.status_code == 503:
+                # Server Overload - Warten und nochmal
+                time.sleep(3)
+                continue
+            elif response.status_code == 429:
+                return None, "RATE_LIMIT"
+            else:
+                return None, f"Fehler {response.status_code}"
+        except Exception as e: return None, str(e)
+    
+    return None, "Server Timeout (503)"
 
 def fetch_all_ai_data_manual(titel, autor, model_name):
-    # 1. Sammle Kontext (Triple Engine)
     wiki_text = get_wiki_info(titel, autor)
     google_text = get_google_books_description(titel, autor)
     
-    # 2. Baue den Prompt
     context_str = ""
     if wiki_text: context_str += f"WIKIPEDIA TEXT:\n{wiki_text}\n\n"
     if google_text: context_str += f"GOOGLE BOOKS TEXT:\n{google_text}\n\n"
