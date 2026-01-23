@@ -10,9 +10,14 @@ from deep_translator import GoogleTranslator
 import json
 import re
 import threading
+import wikipedia  # NEU: Das Wikipedia Modul
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Meine Leseliste", page_icon="📚", layout="wide")
+
+# --- SPRACHE EINSTELLEN ---
+try: wikipedia.set_lang("de")
+except: pass
 
 # --- STATE INIT ---
 NAV_OPTIONS = ["✍️ Neu", "🔍 Sammlung", "🔮 Merkliste", "👥 Statistik"]
@@ -94,7 +99,6 @@ st.markdown("""
         object-fit: contain; 
     }
 
-    /* Zwingt Inhalt nebeneinander */
     [data-testid="stVerticalBlockBorderWrapper"] > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
         display: flex !important;
         flex-direction: row !important;
@@ -197,27 +201,21 @@ def force_reload():
 
 # --- AUTOMATIC CLEANUP & SYNC ---
 def auto_cleanup_authors(ws_books, ws_authors):
-    """Bereinigt Autorennamen im Buch-Sheet UND aktualisiert das Autoren-Sheet"""
     try:
         all_vals = ws_books.get_all_values()
         if len(all_vals) < 2: return
         headers = [str(h).lower() for h in all_vals[0]]
         idx_a = headers.index("autor")
-        
         import unicodedata
         def clean(t): return unicodedata.normalize('NFKC', str(t)).strip()
-        
-        # 1. Bereinigung
         raw_authors = [clean(row[idx_a]) for row in all_vals[1:] if len(row) > idx_a and row[idx_a]]
         unique_authors_raw = sorted(list(set(raw_authors)), key=len, reverse=True)
-        
         replacements = {}
         for long in unique_authors_raw:
             for short in unique_authors_raw:
                 if long == short: continue
                 if short in long and len(long) > len(short) + 2:
                     if short not in replacements: replacements[short] = long
-        
         if replacements:
             for i, row in enumerate(all_vals):
                 if i == 0: continue
@@ -226,18 +224,14 @@ def auto_cleanup_authors(ws_books, ws_authors):
                     if current in replacements:
                         ws_books.update_cell(i+1, idx_a+1, replacements[current])
                         time.sleep(0.2)
-        
-        # 2. Sync to Authors Sheet
         updated_vals = ws_books.get_all_values()
         final_authors = sorted(list(set([clean(row[idx_a]) for row in updated_vals[1:] if len(row) > idx_a and row[idx_a]])))
-        
         if ws_authors:
             try:
                 ws_authors.clear()
                 data_to_write = [["Name"]] + [[a] for a in final_authors]
                 ws_authors.update(range_name="A1", values=data_to_write)
             except: pass
-
     except: pass
 
 def update_single_entry(ws, titel, field, value, ws_authors):
@@ -294,12 +288,13 @@ def filter_and_sort_books(df_in, query, sort_by):
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
     return df
 
-# --- API HELPERS ---
+# --- API HELPERS (TRIPLE ENGINE) ---
 def process_genre(raw):
     if not raw: return "Roman"
     try: return "Roman" if "römisch" in GoogleTranslator(source='auto', target='de').translate(raw).lower() else raw
     except: return "Roman"
 
+# Engine 1: Google Books & Open Library (Bilder & Basis-Text)
 def fetch_cover_candidates_loose(titel, autor, ws_logs=None):
     candidates = [] 
     try:
@@ -335,7 +330,27 @@ def fetch_meta_single(titel, autor):
     c = cands[0] if cands else "-"
     return c, "Roman", datetime.now().strftime("%Y") 
 
-# --- AI CORE ---
+# Engine 2: Wikipedia (Fakten)
+def get_wiki_info(titel, autor):
+    try:
+        search_query = f"{titel} {autor} buch roman"
+        results = wikipedia.search(search_query)
+        if not results: return ""
+        page = wikipedia.page(results[0])
+        return page.content[:3000] # Erste 3000 Zeichen (Intro + Plot meistens)
+    except: return ""
+
+def get_google_books_description(titel, autor):
+    try:
+        query = f"{titel} {autor}"
+        url = f"https://www.googleapis.com/books/v1/volumes?q={urllib.parse.quote(query)}&maxResults=1"
+        r = requests.get(url).json()
+        if "items" in r:
+            return r["items"][0]["volumeInfo"].get("description", "")
+    except: return ""
+    return ""
+
+# --- AI CORE (Engine 3: Processing) ---
 @st.cache_data(show_spinner=False)
 def get_available_models(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -369,22 +384,41 @@ def call_ai_manual(prompt, model_name):
     except Exception as e: return None, str(e)
 
 def fetch_all_ai_data_manual(titel, autor, model_name):
+    # 1. Sammle Kontext (Triple Engine)
+    wiki_text = get_wiki_info(titel, autor)
+    google_text = get_google_books_description(titel, autor)
+    
+    # 2. Baue den Prompt
+    context_str = ""
+    if wiki_text: context_str += f"WIKIPEDIA TEXT:\n{wiki_text}\n\n"
+    if google_text: context_str += f"GOOGLE BOOKS TEXT:\n{google_text}\n\n"
+    
     prompt = f"""
     Antworte NUR mit validem JSON.
     Buch: "{titel}" von {autor}.
+    
+    Hintergrundwissen (nutze dies prioritär, falls vorhanden):
+    {context_str}
+    
+    Aufgabe:
+    1. Schreibe einen spannenden Teaser (max 60 Wörter). Nutze Wikipedia für Fakten, Google für Details.
+    2. Schreibe eine Bio (max 40 Wörter).
+    3. Ermittle das Jahr und Tags.
+    
     JSON Format:
     {{
-      "tags": "3-5 kurze Tags auf Deutsch",
-      "year": "Erscheinungsjahr (Zahl)",
-      "teaser": "Spannender Teaser auf Deutsch (max 60 Worte)",
-      "bio": "Kurze Autor Bio auf Deutsch (max 30 Worte)"
+      "tags": "3-5 Tags (Deutsch)",
+      "year": "Jahr (Zahl)",
+      "teaser": "Teaser Text (Deutsch)",
+      "bio": "Bio Text (Deutsch)"
     }}
     """
+    
     txt, err = call_ai_manual(prompt, model_name)
-    fallback = {"tags": "-", "year": "", "teaser": f"Keine automatischen Infos verfügbar. ({err})" if err else "Keine automatischen Infos verfügbar.", "bio": "-"}
+    fallback = {"tags": "-", "year": "", "teaser": f"Keine Infos ({err})" if err else "Keine Infos.", "bio": "-"}
     if err: return fallback, err
     try: return json.loads(txt), None
-    except: return {"tags": "-", "year": "", "teaser": "Keine automatischen Infos verfügbar (JSON Fehler).", "bio": "-"}, "JSON Error"
+    except: return {"tags": "-", "year": "", "teaser": "JSON Fehler.", "bio": "-"}, "JSON Error"
 
 def smart_author(short, known):
     s = short.strip().lower()
@@ -512,8 +546,8 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
 
         st.markdown("---")
         st.write("✨ **KI-Aktionen**")
-        if st.button("🪄 Infos neu generieren (Teaser/Bio)", type="primary"):
-            with st.spinner("Zaubere..."):
+        if st.button("🪄 Infos neu generieren (Triple Engine)", type="primary"):
+            with st.spinner("Recherchiere (Wiki + Google + KI)..."):
                 mod_name = st.session_state.get("selected_model_name", "gemma-3-27b-it")
                 ai_data, err = fetch_all_ai_data_manual(new_title, new_author, mod_name)
                 if ai_data:
@@ -709,7 +743,7 @@ def main():
                         log_to_sheet(ws_logs, f"Neu: {t}", "NEW")
                         auto_cleanup_authors(ws_books, ws_authors)
                         force_reload()
-                    st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.5); st.rerun()
+                    st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
     # --- RENDER FUNKTION ---
