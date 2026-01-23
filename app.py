@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import Request
 import requests
 import time
 import urllib.parse
@@ -133,9 +134,26 @@ def get_connection():
             creds_dict = dict(st.secrets["gcp_service_account"])
             if "private_key" in creds_dict: creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-            return gspread.authorize(creds)
-        except Exception: return None
-    return None
+            client = gspread.authorize(creds)
+            return client, creds
+        except Exception: return None, None
+    return None, None
+
+def get_placeholder_from_drive(creds):
+    try:
+        if not creds.valid: creds.refresh(Request())
+        headers = {"Authorization": f"Bearer {creds.token}"}
+        params = {"q": "name = 'placeholder.png' and trashed = false", "fields": "files(id, name)"}
+        url_search = "https://www.googleapis.com/drive/v3/files"
+        r = requests.get(url_search, headers=headers, params=params)
+        files = r.json().get("files", [])
+        if not files: return None
+        file_id = files[0]["id"]
+        url_download = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        r_down = requests.get(url_download, headers=headers)
+        if r_down.status_code == 200: return r_down.content
+        return None
+    except Exception as e: return None
 
 def setup_sheets(client):
     if not client: return None, None, None, None
@@ -159,25 +177,17 @@ def check_structure(ws):
     try:
         head = ws.row_values(1)
         if not head: ws.update_cell(1,1,"Titel"); head=["Titel"]
-        # Update needed columns list to include 'Lesejahr'
         needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio", "Lesejahr"]
-        
-        # Check current columns and append missing ones
         current_cols_lower = [h.lower() for h in head]
         next_c = len(head) + 1
-        
         for n in needed:
             if n.lower() not in current_cols_lower:
-                ws.update_cell(1, next_c, n)
-                next_c += 1
-                time.sleep(0.5)
-                
+                ws.update_cell(1, next_c, n); next_c += 1; time.sleep(0.5)
         st.session_state.structure_checked = True
     except: pass
 
 # --- DATA ---
 def get_data_fresh(ws):
-    # Added "Lesejahr" to cols
     cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio", "Lesejahr"]
     try:
         raw = ws.get_all_values()
@@ -268,13 +278,12 @@ def filter_and_sort_books(df_in, query, sort_by):
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
     elif sort_by == "Lesejahr (Neu -> Alt)":
-        # Konvertiere Lesejahr zu Numerisch für Sortierung, leere Werte nach unten
         df['year_sort'] = pd.to_numeric(df['Lesejahr'], errors='coerce').fillna(0)
         df = df.sort_values(by=['year_sort', 'Titel'], ascending=[False, True])
     
     return df
 
-# --- API HELPERS (TRIPLE ENGINE) ---
+# --- API HELPERS ---
 def process_genre(raw):
     if not raw: return "Roman"
     try: return "Roman" if "römisch" in GoogleTranslator(source='auto', target='de').translate(raw).lower() else raw
@@ -334,7 +343,7 @@ def get_google_books_description(titel, autor):
     except: return ""
     return ""
 
-# --- AI CORE (Engine 3: Processing & Retry) ---
+# --- AI CORE ---
 @st.cache_data(show_spinner=False)
 def get_available_models(api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -353,7 +362,6 @@ def call_ai_manual(prompt, model_name):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {"contents": [{"parts": [{"text": prompt}]}]}
-    
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -366,37 +374,27 @@ def call_ai_manual(prompt, model_name):
                     if match: return match.group(0), None
                     return txt, None
                 except: return None, "Parse Fehler"
-            elif response.status_code == 503:
-                time.sleep(3)
-                continue
-            elif response.status_code == 429:
-                return None, "RATE_LIMIT"
-            else:
-                return None, f"Fehler {response.status_code}"
+            elif response.status_code == 503: time.sleep(3); continue
+            elif response.status_code == 429: return None, "RATE_LIMIT"
+            else: return None, f"Fehler {response.status_code}"
         except Exception as e: return None, str(e)
-    
     return None, "Server Timeout (503)"
 
 def fetch_all_ai_data_manual(titel, autor, model_name):
     wiki_text = get_wiki_info(titel, autor)
     google_text = get_google_books_description(titel, autor)
-    
     context_str = ""
     if wiki_text: context_str += f"WIKIPEDIA TEXT:\n{wiki_text}\n\n"
     if google_text: context_str += f"GOOGLE BOOKS TEXT:\n{google_text}\n\n"
-    
     prompt = f"""
     Antworte NUR mit validem JSON.
     Buch: "{titel}" von {autor}.
-    
     Hintergrundwissen (nutze dies prioritär, falls vorhanden):
     {context_str}
-    
     Aufgabe:
     1. Schreibe einen spannenden Teaser (max 60 Wörter). Nutze Wikipedia für Fakten, Google für Details.
     2. Schreibe eine Bio (max 40 Wörter).
     3. Ermittle das Jahr und Tags.
-    
     JSON Format:
     {{
       "tags": "3-5 Tags (Deutsch)",
@@ -405,7 +403,6 @@ def fetch_all_ai_data_manual(titel, autor, model_name):
       "bio": "Bio Text (Deutsch)"
     }}
     """
-    
     txt, err = call_ai_manual(prompt, model_name)
     fallback = {"tags": "-", "year": "", "teaser": f"Keine Infos ({err})" if err else "Keine Infos.", "bio": "-"}
     if err: return fallback, err
@@ -489,14 +486,15 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
         st.markdown(f"**von {book['Autor']}**")
         c1, c2 = st.columns([1, 2])
         with c1:
-            cov = book["Cover"] if book["Cover"] != "-" else "https://via.placeholder.com/200x300?text=No+Cover"
-            st.markdown(f'<img src="{cov}" style="width:100%; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">', unsafe_allow_html=True)
-            if book.get('Bewertung'): st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
+            final_img = "https://via.placeholder.com/150?text=No+Cover"
+            if book["Cover"] and str(book["Cover"]).startswith("http") and str(book["Cover"]) != "-":
+                final_img = book["Cover"]
+            elif "placeholder_img" in st.session_state and st.session_state.placeholder_img is not None:
+                final_img = st.session_state.placeholder_img
+            st.image(final_img, use_container_width=True)
             
-            # --- LESEJAHR DISPLAY ---
-            if book.get("Lesejahr"):
-                st.markdown(f"📅 **Gelesen:** {book['Lesejahr']}")
-                
+            if book.get('Bewertung'): st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
+            if book.get("Lesejahr"): st.markdown(f"📅 **Gelesen:** {book['Lesejahr']}")
             if "Tags" in book and book["Tags"]:
                 st.write("")
                 for t in book["Tags"].split(","): st.markdown(f'<span class="book-tag">{t.strip()}</span>', unsafe_allow_html=True)
@@ -514,17 +512,13 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
         st.write("📝 **Daten bearbeiten**")
         new_title = st.text_input("Titel", value=book["Titel"])
         new_author = st.text_input("Autor", value=book["Autor"])
-        
         c_meta1, c_meta2 = st.columns(2)
         with c_meta1: new_year = st.text_input("Erscheinungsjahr", value=book.get("Erschienen", ""))
         with c_meta2: new_read_year = st.text_input("Gelesen im Jahr", value=book.get("Lesejahr", ""))
-        
         new_tags = st.text_input("Tags", value=book.get("Tags", ""))
         
         st.markdown("---")
         st.write("🖼️ **Cover ändern**")
-        
-        # INLINE COVER SEARCH
         if "gallery_images" not in st.session_state:
             if st.button("🔍 Galerie laden"):
                 with st.spinner("Suche..."):
@@ -541,7 +535,6 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                         st.session_state.temp_cover = img_url
                         st.success("Ausgewählt!")
         
-        # Manuelle URL
         current_cover = st.session_state.get("temp_cover", book.get("Cover", ""))
         new_cover_url = st.text_input("Cover URL", value=current_cover)
 
@@ -556,14 +549,11 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                     st.success("Generiert! Bitte unten speichern.")
                 else: st.error(f"Fehler: {err}")
 
-        # SPEICHERN
         st.markdown("---")
         if st.button("💾 Alle Änderungen speichern", type="primary"):
             try:
                 cell = ws_books.find(book["Titel"])
                 headers = [str(h).lower() for h in ws_books.row_values(1)]
-                
-                # Mapping
                 col_t = headers.index("titel") + 1
                 col_a = headers.index("autor") + 1
                 try: col_c = headers.index("cover") + 1
@@ -579,7 +569,6 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 try: col_read_year = headers.index("lesejahr") + 1
                 except: col_read_year = len(headers) + 5
                 
-                # Check for AI updates
                 final_teaser = book.get("Teaser", "")
                 final_bio = book.get("Bio", "")
                 if "temp_ai_data" in st.session_state:
@@ -601,14 +590,10 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 auto_cleanup_authors(ws_books, ws_authors)
                 force_reload()
                 
-                # Cleanup Session
                 if "gallery_images" in st.session_state: del st.session_state.gallery_images
                 if "temp_cover" in st.session_state: del st.session_state.temp_cover
                 if "temp_ai_data" in st.session_state: del st.session_state.temp_ai_data
-                
-                st.success("Gespeichert!")
-                time.sleep(1)
-                st.rerun()
+                st.success("Gespeichert!"); time.sleep(1); st.rerun()
             except Exception as e: st.error(f"Fehler: {e}")
             
         if st.button("🗑️ Buch löschen"):
@@ -620,17 +605,16 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
 def main():
     st.title("Meine Leseliste")
     
-    # Cleanup old session states on load
     if "gallery_images" in st.session_state: del st.session_state.gallery_images
     
-    client = get_connection()
+    client, creds = get_connection()
     if not client: st.error("Secrets fehlen!"); st.stop()
     
-    # SETUP SHEETS WITH ROBUST UNPACKING
+    if "placeholder_img" not in st.session_state:
+        st.session_state.placeholder_img = get_placeholder_from_drive(creds)
+    
     sheets_res = setup_sheets(client)
-    if not sheets_res or not sheets_res[0]:
-        st.error("Fehler bei der Verbindung zu Google Sheets.")
-        st.stop()
+    if not sheets_res or not sheets_res[0]: st.error("Fehler bei der Verbindung zu Google Sheets."); st.stop()
         
     sh, ws_books, ws_logs, ws_authors = sheets_res
     check_structure(ws_books)
@@ -640,7 +624,6 @@ def main():
     with st.sidebar:
         st.write("🔧 **Einstellungen**")
         
-        # 1. KI UPDATE (GANZ OBEN)
         missing_count = 0
         missing_indices = []
         if not df.empty:
@@ -655,18 +638,15 @@ def main():
         if missing_count > 0:
             st.warning(f"{missing_count} Bücher offen.")
             if st.button("✨ Infos laden", type="primary", use_container_width=True):
-                # Background Worker
-                if not 'selected_model_name' in st.session_state: st.session_state.selected_model_name = "gemma-3-27b-it" # Fallback
+                if not 'selected_model_name' in st.session_state: st.session_state.selected_model_name = "gemma-3-27b-it" 
                 t = threading.Thread(target=background_update_task, args=(missing_indices, df.copy(), st.session_state.selected_model_name, ws_books, ws_logs, ws_authors), name="BackgroundUpdater")
                 t.start()
                 st.session_state.background_status = "running"
                 st.toast("Hintergrund-Update gestartet!")
                 time.sleep(0.5)
                 st.rerun()
-        else:
-            st.success("Alles aktuell.")
+        else: st.success("Alles aktuell.")
 
-        # STATUS CHECK FOR BACKGROUND WORKER
         if st.session_state.background_status == "running":
             st.markdown("<div class='status-running'>🔄 Hintergrund-Update läuft...</div>", unsafe_allow_html=True)
             is_running = any(t.name == "BackgroundUpdater" for t in threading.enumerate())
@@ -681,8 +661,6 @@ def main():
             st.session_state.bg_message = None
 
         st.markdown("---")
-        
-        # 2. VERWALTUNG (OPTISCH ANGEGLICHEN)
         st.write("⚙️ **Verwaltung**")
         st.link_button("📂 Tabelle öffnen", f"https://docs.google.com/spreadsheets/d/{sh.id}", use_container_width=True)
         st.button("🔄 Cache leeren", use_container_width=True, on_click=lambda: (force_reload(), st.rerun()))
@@ -691,8 +669,6 @@ def main():
             except Exception as e: st.error(f"Fehler: {e}")
             
         st.markdown("---")
-        
-        # 3. MODELL (GANZ UNTEN)
         if "available_models_list" not in st.session_state:
             with st.spinner("Lade Modelle..."):
                 if "gemini_api_key" in st.secrets: st.session_state.available_models_list = get_available_models(st.secrets["gemini_api_key"])
@@ -742,14 +718,9 @@ def main():
                     val = (rate + 1) if rate is not None else 0
                     t, a = [x.strip() for x in inp.split(",", 1)]
                     fa = smart_author(a, authors)
-                    
-                    # Lesejahr Logic: Wenn leer -> Aktuelles Jahr
                     final_read_year = read_year.strip() if read_year else str(datetime.now().year)
-                    
                     with st.spinner("Speichere..."):
                         c, g, y = fetch_meta_single(t, fa)
-                        # Append Row needs exact column count based on check_structure logic
-                        # Structure: Titel, Autor, Genre, Bewertung, Cover, Hinzugefügt, Notiz, Status, Tags, Erschienen, Teaser, Bio, Lesejahr
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", "", final_read_year])
                         log_to_sheet(ws_logs, f"Neu: {t}", "NEW")
                         auto_cleanup_authors(ws_books, ws_authors)
@@ -770,13 +741,9 @@ def main():
             return
 
         if view_mode == "Liste":
-            # Liste Anzeige anpassen
             cols_show = ["Titel", "Autor", "Notiz", "Lesejahr"]
             if not is_wishlist: cols_show.insert(2, "Bewertung")
-            
-            # Ensure columns exist before selecting
             cols_show = [c for c in cols_show if c in df_filtered.columns]
-            
             df_display = df_filtered[cols_show].copy()
             df_display.insert(0, "Info", False)
             edited = st.data_editor(df_display, column_config={
@@ -786,14 +753,12 @@ def main():
                 "Bewertung": st.column_config.NumberColumn("⭐", min_value=0, max_value=5),
                 "Lesejahr": st.column_config.TextColumn("Jahr")
             }, hide_index=True, use_container_width=True, key=f"ed_{is_wishlist}")
-            
             if edited["Info"].any():
                 sel_idx = edited[edited["Info"]].index[0]
                 orig_title = df_display.iloc[sel_idx]["Titel"]
                 orig_row = df[df["Titel"] == orig_title].iloc[0]
                 show_book_details(orig_row, ws_books, ws_authors, ws_logs)
         else:
-            # --- ROW CHUNKING FIX (Sortierung auch Mobil korrekt) ---
             for i in range(0, len(df_filtered), 3):
                 batch = df_filtered.iloc[i:i+3]
                 cols = st.columns(3)
@@ -802,32 +767,30 @@ def main():
                         with st.container(border=True):
                             c_img, c_content = st.columns([1, 2])
                             with c_img:
-                                st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
+                                final_image = "https://via.placeholder.com/150?text=No+Cover"
+                                if row["Cover"] and str(row["Cover"]).startswith("http") and str(row["Cover"]) != "-":
+                                    final_image = row["Cover"]
+                                elif "placeholder_img" in st.session_state and st.session_state.placeholder_img is not None:
+                                    final_image = st.session_state.placeholder_img
+                                st.image(final_image, use_container_width=True)
                             with c_content:
                                 st.markdown(f"<span class='tile-title'>{row['Titel']}</span>", unsafe_allow_html=True)
                                 year_disp = f"<span class='year-badge'>{row.get('Erschienen')}</span>" if row.get("Erschienen") else ""
                                 st.markdown(f"<span class='tile-meta'>{row['Autor']}{year_disp}</span>", unsafe_allow_html=True)
-                                
                                 if not is_wishlist:
                                     try: s_val = int(row['Bewertung'])
                                     except: s_val = 0
-                                    
                                     stars_html = f"<span style='color:#d35400'>{'★'*s_val}</span>" if s_val > 0 else ""
-                                    # Lesejahr anzeigen wenn vorhanden
                                     read_year_html = ""
                                     if row.get("Lesejahr"):
                                         read_year_html = f"<span class='read-year-badge'>'{str(row['Lesejahr'])[-2:]}</span>"
-                                    
                                     st.markdown(f"{stars_html}{read_year_html}", unsafe_allow_html=True)
-                                
                                 teaser_text = row.get("Teaser", "")
                                 if teaser_text and len(str(teaser_text)) > 5:
                                     st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
                                 else: st.caption("Noch kein Teaser.")
-                                
                                 if st.button("ℹ️ Details", key=f"inf_{idx}_{is_wishlist}", type="primary"): 
                                     show_book_details(row, ws_books, ws_authors, ws_logs)
-                                
                                 if is_wishlist:
                                     if st.button("✅ Gelesen", key=f"read_{idx}", use_container_width=True):
                                         cell = ws_books.find(row["Titel"])
@@ -850,7 +813,6 @@ def main():
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         fa = smart_author(a, authors)
                         c, g, y = fetch_meta_single(t, fa)
-                        # Append Row needs correct length - Lesejahr is empty for wishlist usually or default? Let's leave empty
                         ws_books.append_row([t, fa, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", "", y or "", "", "", ""])
                         auto_cleanup_authors(ws_books, ws_authors)
                         force_reload()
@@ -872,20 +834,6 @@ def main():
             top_author_count = len(df_r[df_r["Autor"] == top_author_name])
         c2.metric("Top Autor", top_author_name, f"{top_author_count} Bücher" if top_author_count > 0 else None)
         st.markdown("---")
-        
-        # Lesejahre Statistik (NEU)
-        if "Lesejahr" in df_r.columns:
-            st.subheader("📅 Bücher pro Jahr")
-            try:
-                # Filtere leere Jahre raus und zähle
-                year_counts = df_r["Lesejahr"].value_counts().reset_index()
-                year_counts.columns = ["Jahr", "Anzahl"]
-                year_counts = year_counts[year_counts["Jahr"] != ""]
-                year_counts = year_counts.sort_values("Jahr", ascending=False)
-                st.dataframe(year_counts, use_container_width=True, hide_index=True)
-            except: st.write("Noch keine Daten.")
-            
-        st.markdown("---")
         all_tags = []
         if not df_r.empty and "Tags" in df_r.columns:
             for t in df_r["Tags"].dropna():
@@ -904,6 +852,17 @@ def main():
             auth_stats.columns = ["Autor", "Anzahl"]
             auth_stats = auth_stats.sort_values(by=["Anzahl", "Autor"], ascending=[False, True])
             st.dataframe(auth_stats, use_container_width=True, hide_index=True, column_config={"Autor": st.column_config.TextColumn("Autor"), "Anzahl": st.column_config.ProgressColumn("Gelesen", format="%d", min_value=0, max_value=int(auth_stats["Anzahl"].max()))})
+        
+        st.markdown("---")
+        if "Lesejahr" in df_r.columns:
+            st.subheader("📅 Bücher pro Jahr")
+            try:
+                year_counts = df_r["Lesejahr"].value_counts().reset_index()
+                year_counts.columns = ["Jahr", "Anzahl"]
+                year_counts = year_counts[year_counts["Jahr"] != ""]
+                year_counts = year_counts.sort_values("Jahr", ascending=False)
+                st.dataframe(year_counts, use_container_width=True, hide_index=True)
+            except: st.write("Noch keine Daten.")
 
 if __name__ == "__main__":
     main()
