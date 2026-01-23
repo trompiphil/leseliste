@@ -86,7 +86,8 @@ st.markdown("""
         overflow: hidden; 
     }
     .year-badge { background-color: #fff8e1; padding: 1px 4px; border-radius: 3px; border: 1px solid #d35400; font-size: 0.75em; color: #d35400; font-weight: bold; margin-left: 5px; }
-    
+    .read-year-badge { background-color: #dcedc8; padding: 1px 4px; border-radius: 3px; border: 1px solid #7cb342; font-size: 0.75em; color: #558b2f; font-weight: bold; margin-left: 5px; }
+
     /* Dialog Boxen */
     .box-teaser { background-color: #fff8e1; border-left: 4px solid #d35400; padding: 10px; border-radius: 4px; margin-bottom: 10px; color: #2c3e50; }
     .box-author { background-color: #eaf2f8; border-left: 4px solid #2980b9; padding: 10px; border-radius: 4px; margin-top: 10px; color: #2c3e50; }
@@ -158,17 +159,26 @@ def check_structure(ws):
     try:
         head = ws.row_values(1)
         if not head: ws.update_cell(1,1,"Titel"); head=["Titel"]
-        needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio"]
-        next_c = len(head)+1
+        # Update needed columns list to include 'Lesejahr'
+        needed = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio", "Lesejahr"]
+        
+        # Check current columns and append missing ones
+        current_cols_lower = [h.lower() for h in head]
+        next_c = len(head) + 1
+        
         for n in needed:
-            if not any(h.lower()==n.lower() for h in head):
-                ws.update_cell(1, next_c, n); next_c+=1; time.sleep(0.5)
+            if n.lower() not in current_cols_lower:
+                ws.update_cell(1, next_c, n)
+                next_c += 1
+                time.sleep(0.5)
+                
         st.session_state.structure_checked = True
     except: pass
 
 # --- DATA ---
 def get_data_fresh(ws):
-    cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio"]
+    # Added "Lesejahr" to cols
+    cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Hinzugefügt", "Notiz", "Status", "Tags", "Erschienen", "Teaser", "Bio", "Lesejahr"]
     try:
         raw = ws.get_all_values()
         if len(raw) < 2: return pd.DataFrame(columns=cols)
@@ -232,17 +242,6 @@ def auto_cleanup_authors(ws_books, ws_authors):
             except: pass
     except: pass
 
-def update_single_entry(ws, titel, field, value, ws_authors):
-    try:
-        cell = ws.find(titel)
-        headers = [str(h).lower() for h in ws.row_values(1)]
-        col = headers.index(field.lower()) + 1
-        ws.update_cell(cell.row, col, value)
-        if field.lower() == "autor": auto_cleanup_authors(ws, ws_authors)
-        force_reload()
-        return True
-    except: return False
-
 def delete_book(ws, titel, ws_authors):
     try:
         cell = ws.find(titel)
@@ -251,22 +250,6 @@ def delete_book(ws, titel, ws_authors):
         force_reload()
         return True
     except: return False
-
-def update_full_dataframe(ws, new_df, ws_authors):
-    current_data = ws.get_all_values()
-    headers = [str(h).lower() for h in current_data[0]]
-    col_idx = {k: headers.index(k) for k in ["titel","autor","bewertung","notiz","status"] if k in headers}
-    if not col_idx: return False
-    for index, row in new_df.iterrows():
-        try:
-            cell = ws.find(row["Titel"])
-            if "Bewertung" in row: ws.update_cell(cell.row, col_idx["bewertung"]+1, row["Bewertung"])
-            if "Notiz" in row: ws.update_cell(cell.row, col_idx["notiz"]+1, row["Notiz"])
-            time.sleep(0.2)
-        except: pass
-    auto_cleanup_authors(ws, ws_authors)
-    force_reload()
-    return True
 
 def filter_and_sort_books(df_in, query, sort_by):
     df = df_in.copy()
@@ -284,6 +267,11 @@ def filter_and_sort_books(df_in, query, sort_by):
         df = df.sort_values(by=['sort_key', 'Titel'], key=lambda col: col.str.lower())
     elif sort_by == "Titel (A-Z)":
         df = df.sort_values(by='Titel', key=lambda col: col.str.lower())
+    elif sort_by == "Lesejahr (Neu -> Alt)":
+        # Konvertiere Lesejahr zu Numerisch für Sortierung, leere Werte nach unten
+        df['year_sort'] = pd.to_numeric(df['Lesejahr'], errors='coerce').fillna(0)
+        df = df.sort_values(by=['year_sort', 'Titel'], ascending=[False, True])
+    
     return df
 
 # --- API HELPERS (TRIPLE ENGINE) ---
@@ -327,7 +315,6 @@ def fetch_meta_single(titel, autor):
     c = cands[0] if cands else "-"
     return c, "Roman", datetime.now().strftime("%Y") 
 
-# Engine 2: Wikipedia (Fakten)
 def get_wiki_info(titel, autor):
     try:
         search_query = f"{titel} {autor} buch roman"
@@ -367,7 +354,6 @@ def call_ai_manual(prompt, model_name):
     headers = {'Content-Type': 'application/json'}
     data = {"contents": [{"parts": [{"text": prompt}]}]}
     
-    # RETRY LOGIC FÜR 503 FEHLER
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -381,7 +367,6 @@ def call_ai_manual(prompt, model_name):
                     return txt, None
                 except: return None, "Parse Fehler"
             elif response.status_code == 503:
-                # Server Overload - Warten und nochmal
                 time.sleep(3)
                 continue
             elif response.status_code == 429:
@@ -507,6 +492,11 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
             cov = book["Cover"] if book["Cover"] != "-" else "https://via.placeholder.com/200x300?text=No+Cover"
             st.markdown(f'<img src="{cov}" style="width:100%; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">', unsafe_allow_html=True)
             if book.get('Bewertung'): st.info(f"Bewertung: {'★' * int(book['Bewertung'])}")
+            
+            # --- LESEJAHR DISPLAY ---
+            if book.get("Lesejahr"):
+                st.markdown(f"📅 **Gelesen:** {book['Lesejahr']}")
+                
             if "Tags" in book and book["Tags"]:
                 st.write("")
                 for t in book["Tags"].split(","): st.markdown(f'<span class="book-tag">{t.strip()}</span>', unsafe_allow_html=True)
@@ -524,7 +514,11 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
         st.write("📝 **Daten bearbeiten**")
         new_title = st.text_input("Titel", value=book["Titel"])
         new_author = st.text_input("Autor", value=book["Autor"])
-        new_year = st.text_input("Jahr", value=book.get("Erschienen", ""))
+        
+        c_meta1, c_meta2 = st.columns(2)
+        with c_meta1: new_year = st.text_input("Erscheinungsjahr", value=book.get("Erschienen", ""))
+        with c_meta2: new_read_year = st.text_input("Gelesen im Jahr", value=book.get("Lesejahr", ""))
+        
         new_tags = st.text_input("Tags", value=book.get("Tags", ""))
         
         st.markdown("---")
@@ -582,6 +576,8 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 except: col_teaser = len(headers) + 3
                 try: col_bio = headers.index("bio") + 1
                 except: col_bio = len(headers) + 4
+                try: col_read_year = headers.index("lesejahr") + 1
+                except: col_read_year = len(headers) + 5
                 
                 # Check for AI updates
                 final_teaser = book.get("Teaser", "")
@@ -600,6 +596,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 ws_books.update_cell(cell.row, col_y, new_year)
                 ws_books.update_cell(cell.row, col_teaser, final_teaser)
                 ws_books.update_cell(cell.row, col_bio, final_bio)
+                ws_books.update_cell(cell.row, col_read_year, new_read_year)
                 
                 auto_cleanup_authors(ws_books, ws_authors)
                 force_reload()
@@ -738,15 +735,22 @@ def main():
             with c1: inp = st.text_input("Titel, Autor")
             with c2: 
                 note = st.text_input("Notiz")
+                read_year = st.text_input("Gelesen im Jahr (optional)")
                 rate = st.feedback("stars")
             if st.form_submit_button("Speichern"):
                 if "," in inp:
                     val = (rate + 1) if rate is not None else 0
                     t, a = [x.strip() for x in inp.split(",", 1)]
                     fa = smart_author(a, authors)
+                    
+                    # Lesejahr Logic: Wenn leer -> Aktuelles Jahr
+                    final_read_year = read_year.strip() if read_year else str(datetime.now().year)
+                    
                     with st.spinner("Speichere..."):
                         c, g, y = fetch_meta_single(t, fa)
-                        ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
+                        # Append Row needs exact column count based on check_structure logic
+                        # Structure: Titel, Autor, Genre, Bewertung, Cover, Hinzugefügt, Notiz, Status, Tags, Erschienen, Teaser, Bio, Lesejahr
+                        ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", "", final_read_year])
                         log_to_sheet(ws_logs, f"Neu: {t}", "NEW")
                         auto_cleanup_authors(ws_books, ws_authors)
                         force_reload()
@@ -757,7 +761,7 @@ def main():
     def render_library_view(dataset, is_wishlist=False):
         c1, c2 = st.columns([2, 1])
         with c1: q = st.text_input("Suche (Titel, Autor, Tags)", placeholder="Suchen...", label_visibility="collapsed")
-        with c2: sort_by = st.selectbox("Sortieren", ["Autor (A-Z)", "Titel (A-Z)"], label_visibility="collapsed")
+        with c2: sort_by = st.selectbox("Sortieren", ["Autor (A-Z)", "Titel (A-Z)", "Lesejahr (Neu -> Alt)"], label_visibility="collapsed")
         view_mode = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed", key=f"v_{is_wishlist}")
         
         df_filtered = filter_and_sort_books(dataset, q, sort_by)
@@ -766,11 +770,23 @@ def main():
             return
 
         if view_mode == "Liste":
-            cols_show = ["Titel", "Autor", "Notiz"]
+            # Liste Anzeige anpassen
+            cols_show = ["Titel", "Autor", "Notiz", "Lesejahr"]
             if not is_wishlist: cols_show.insert(2, "Bewertung")
+            
+            # Ensure columns exist before selecting
+            cols_show = [c for c in cols_show if c in df_filtered.columns]
+            
             df_display = df_filtered[cols_show].copy()
             df_display.insert(0, "Info", False)
-            edited = st.data_editor(df_display, column_config={"Info": st.column_config.CheckboxColumn("Info", width="small"), "Titel": st.column_config.TextColumn(disabled=True), "Autor": st.column_config.TextColumn(disabled=True), "Bewertung": st.column_config.NumberColumn("⭐", min_value=0, max_value=5)}, hide_index=True, use_container_width=True, key=f"ed_{is_wishlist}")
+            edited = st.data_editor(df_display, column_config={
+                "Info": st.column_config.CheckboxColumn("Info", width="small"),
+                "Titel": st.column_config.TextColumn(disabled=True),
+                "Autor": st.column_config.TextColumn(disabled=True),
+                "Bewertung": st.column_config.NumberColumn("⭐", min_value=0, max_value=5),
+                "Lesejahr": st.column_config.TextColumn("Jahr")
+            }, hide_index=True, use_container_width=True, key=f"ed_{is_wishlist}")
+            
             if edited["Info"].any():
                 sel_idx = edited[edited["Info"]].index[0]
                 orig_title = df_display.iloc[sel_idx]["Titel"]
@@ -795,7 +811,14 @@ def main():
                                 if not is_wishlist:
                                     try: s_val = int(row['Bewertung'])
                                     except: s_val = 0
-                                    if s_val > 0: st.markdown(f"<span style='color:#d35400'>{'★'*s_val}</span>", unsafe_allow_html=True)
+                                    
+                                    stars_html = f"<span style='color:#d35400'>{'★'*s_val}</span>" if s_val > 0 else ""
+                                    # Lesejahr anzeigen wenn vorhanden
+                                    read_year_html = ""
+                                    if row.get("Lesejahr"):
+                                        read_year_html = f"<span class='read-year-badge'>'{str(row['Lesejahr'])[-2:]}</span>"
+                                    
+                                    st.markdown(f"{stars_html}{read_year_html}", unsafe_allow_html=True)
                                 
                                 teaser_text = row.get("Teaser", "")
                                 if teaser_text and len(str(teaser_text)) > 5:
@@ -827,7 +850,8 @@ def main():
                         t, a = [x.strip() for x in iw.split(",", 1)]
                         fa = smart_author(a, authors)
                         c, g, y = fetch_meta_single(t, fa)
-                        ws_books.append_row([t, fa, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", "", y or "", "", ""])
+                        # Append Row needs correct length - Lesejahr is empty for wishlist usually or default? Let's leave empty
+                        ws_books.append_row([t, fa, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", "", y or "", "", "", ""])
                         auto_cleanup_authors(ws_books, ws_authors)
                         force_reload()
                         log_to_sheet(ws_logs, f"Wunsch: {t}", "WISH"); st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
@@ -847,6 +871,20 @@ def main():
             top_author_name = df_r["Autor"].mode()[0]
             top_author_count = len(df_r[df_r["Autor"] == top_author_name])
         c2.metric("Top Autor", top_author_name, f"{top_author_count} Bücher" if top_author_count > 0 else None)
+        st.markdown("---")
+        
+        # Lesejahre Statistik (NEU)
+        if "Lesejahr" in df_r.columns:
+            st.subheader("📅 Bücher pro Jahr")
+            try:
+                # Filtere leere Jahre raus und zähle
+                year_counts = df_r["Lesejahr"].value_counts().reset_index()
+                year_counts.columns = ["Jahr", "Anzahl"]
+                year_counts = year_counts[year_counts["Jahr"] != ""]
+                year_counts = year_counts.sort_values("Jahr", ascending=False)
+                st.dataframe(year_counts, use_container_width=True, hide_index=True)
+            except: st.write("Noch keine Daten.")
+            
         st.markdown("---")
         all_tags = []
         if not df_r.empty and "Tags" in df_r.columns:
