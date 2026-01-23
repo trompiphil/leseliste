@@ -195,53 +195,72 @@ def get_data(ws):
 def force_reload():
     if "df_books" in st.session_state: del st.session_state.df_books
 
-# --- AUTOMATIC CLEANUP ---
-def auto_cleanup_authors(ws_books):
+# --- AUTOMATIC CLEANUP & SYNC ---
+def auto_cleanup_authors(ws_books, ws_authors):
+    """Bereinigt Autorennamen im Buch-Sheet UND aktualisiert das Autoren-Sheet"""
     try:
         all_vals = ws_books.get_all_values()
         if len(all_vals) < 2: return
         headers = [str(h).lower() for h in all_vals[0]]
         idx_a = headers.index("autor")
+        
         import unicodedata
         def clean(t): return unicodedata.normalize('NFKC', str(t)).strip()
+        
+        # 1. Bereinigung
         raw_authors = [clean(row[idx_a]) for row in all_vals[1:] if len(row) > idx_a and row[idx_a]]
-        unique_authors = sorted(list(set(raw_authors)), key=len, reverse=True)
+        unique_authors_raw = sorted(list(set(raw_authors)), key=len, reverse=True)
+        
         replacements = {}
-        for long in unique_authors:
-            for short in unique_authors:
+        for long in unique_authors_raw:
+            for short in unique_authors_raw:
                 if long == short: continue
                 if short in long and len(long) > len(short) + 2:
                     if short not in replacements: replacements[short] = long
-        if not replacements: return
-        for i, row in enumerate(all_vals):
-            if i == 0: continue
-            if len(row) > idx_a:
-                current = clean(row[idx_a])
-                if current in replacements:
-                    ws_books.update_cell(i+1, idx_a+1, replacements[current])
-                    time.sleep(0.2)
+        
+        if replacements:
+            for i, row in enumerate(all_vals):
+                if i == 0: continue
+                if len(row) > idx_a:
+                    current = clean(row[idx_a])
+                    if current in replacements:
+                        ws_books.update_cell(i+1, idx_a+1, replacements[current])
+                        time.sleep(0.2)
+        
+        # 2. Sync to Authors Sheet
+        updated_vals = ws_books.get_all_values()
+        final_authors = sorted(list(set([clean(row[idx_a]) for row in updated_vals[1:] if len(row) > idx_a and row[idx_a]])))
+        
+        if ws_authors:
+            try:
+                ws_authors.clear()
+                data_to_write = [["Name"]] + [[a] for a in final_authors]
+                ws_authors.update(range_name="A1", values=data_to_write)
+            except: pass
+
     except: pass
 
-def update_single_entry(ws, titel, field, value):
+def update_single_entry(ws, titel, field, value, ws_authors):
     try:
         cell = ws.find(titel)
         headers = [str(h).lower() for h in ws.row_values(1)]
         col = headers.index(field.lower()) + 1
         ws.update_cell(cell.row, col, value)
-        if field.lower() == "autor": auto_cleanup_authors(ws)
+        if field.lower() == "autor": auto_cleanup_authors(ws, ws_authors)
         force_reload()
         return True
     except: return False
 
-def delete_book(ws, titel):
+def delete_book(ws, titel, ws_authors):
     try:
         cell = ws.find(titel)
         ws.delete_rows(cell.row)
+        auto_cleanup_authors(ws, ws_authors)
         force_reload()
         return True
     except: return False
 
-def update_full_dataframe(ws, new_df):
+def update_full_dataframe(ws, new_df, ws_authors):
     current_data = ws.get_all_values()
     headers = [str(h).lower() for h in current_data[0]]
     col_idx = {k: headers.index(k) for k in ["titel","autor","bewertung","notiz","status"] if k in headers}
@@ -253,7 +272,7 @@ def update_full_dataframe(ws, new_df):
             if "Notiz" in row: ws.update_cell(cell.row, col_idx["notiz"]+1, row["Notiz"])
             time.sleep(0.2)
         except: pass
-    auto_cleanup_authors(ws)
+    auto_cleanup_authors(ws, ws_authors)
     force_reload()
     return True
 
@@ -374,7 +393,7 @@ def smart_author(short, known):
     return short
 
 # --- BACKGROUND WORKER ---
-def background_update_task(missing_indices, df_copy, model_name, ws_books, ws_logs):
+def background_update_task(missing_indices, df_copy, model_name, ws_books, ws_logs, ws_authors):
     log_to_sheet(ws_logs, "🚀 Hintergrund-Update gestartet", "START")
     headers = [str(h).lower() for h in ws_books.row_values(1)]
     try:
@@ -402,12 +421,12 @@ def background_update_task(missing_indices, df_copy, model_name, ws_books, ws_lo
                 log_to_sheet(ws_logs, f"Background: {row['Titel']} fertig", "SUCCESS")
             time.sleep(1.0)
         except Exception as e: log_to_sheet(ws_logs, f"Error bei {row['Titel']}: {e}", "ERROR")
-    auto_cleanup_authors(ws_books)
+    auto_cleanup_authors(ws_books, ws_authors)
     log_to_sheet(ws_logs, "✅ Hintergrund-Update beendet", "DONE")
 
 # --- UI DIALOGS ---
 @st.dialog("🖼️ Cover auswählen")
-def open_cover_gallery(book, ws_books, ws_logs):
+def open_cover_gallery(book, ws_books, ws_logs, ws_authors):
     st.write(f"Suche Cover für **{book['Titel']}**...")
     if "gallery_images" not in st.session_state:
         with st.spinner("Suche..."):
@@ -427,7 +446,7 @@ def open_cover_gallery(book, ws_books, ws_logs):
                         except: c_col = 5
                         ws_books.update_cell(cell.row, c_col, img_url)
                         log_to_sheet(ws_logs, f"Neues Cover gesetzt: {book['Titel']}", "UPDATE")
-                        auto_cleanup_authors(ws_books)
+                        auto_cleanup_authors(ws_books, ws_authors)
                         force_reload()
                         del st.session_state.gallery_images
                         st.rerun()
@@ -541,7 +560,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
                 ws_books.update_cell(cell.row, col_teaser, final_teaser)
                 ws_books.update_cell(cell.row, col_bio, final_bio)
                 
-                auto_cleanup_authors(ws_books)
+                auto_cleanup_authors(ws_books, ws_authors)
                 force_reload()
                 
                 # Cleanup Session
@@ -555,7 +574,7 @@ def show_book_details(book, ws_books, ws_authors, ws_logs):
             except Exception as e: st.error(f"Fehler: {e}")
             
         if st.button("🗑️ Buch löschen"):
-            if delete_book(ws_books, book["Titel"]):
+            if delete_book(ws_books, book["Titel"], ws_authors):
                 st.success("Gelöscht!"); time.sleep(1); st.rerun()
 
 
@@ -600,7 +619,7 @@ def main():
             if st.button("✨ Infos laden", type="primary", use_container_width=True):
                 # Background Worker
                 if not 'selected_model_name' in st.session_state: st.session_state.selected_model_name = "gemma-3-27b-it" # Fallback
-                t = threading.Thread(target=background_update_task, args=(missing_indices, df.copy(), st.session_state.selected_model_name, ws_books, ws_logs), name="BackgroundUpdater")
+                t = threading.Thread(target=background_update_task, args=(missing_indices, df.copy(), st.session_state.selected_model_name, ws_books, ws_logs, ws_authors), name="BackgroundUpdater")
                 t.start()
                 st.session_state.background_status = "running"
                 st.toast("Hintergrund-Update gestartet!")
@@ -688,9 +707,9 @@ def main():
                         c, g, y = fetch_meta_single(t, fa)
                         ws_books.append_row([t, fa, g, val, c or "-", datetime.now().strftime("%Y-%m-%d"), note, "Gelesen", "", y or "", "", ""])
                         log_to_sheet(ws_logs, f"Neu: {t}", "NEW")
-                        auto_cleanup_authors(ws_books)
+                        auto_cleanup_authors(ws_books, ws_authors)
                         force_reload()
-                    st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.0); st.rerun()
+                    st.success(f"Gespeichert: {t}"); st.balloons(); time.sleep(1.5); st.rerun()
                 else: st.error("Format: Titel, Autor")
 
     # --- RENDER FUNKTION ---
@@ -718,16 +737,12 @@ def main():
                 show_book_details(orig_row, ws_books, ws_authors, ws_logs)
         else:
             # --- ROW CHUNKING FIX (Sortierung auch Mobil korrekt) ---
-            # Wir iterieren in 3er Schritten durch die Liste
             for i in range(0, len(df_filtered), 3):
                 batch = df_filtered.iloc[i:i+3]
-                cols = st.columns(3) # Neue Zeile für jeden Batch
-                
+                cols = st.columns(3)
                 for j, (idx, row) in enumerate(batch.iterrows()):
                     with cols[j]:
-                        # Mit CSS-Klasse "tile-container" für gezieltes Styling
                         with st.container(border=True):
-                            # Layout: Bild Links (1 Teil), Content Rechts (2 Teile)
                             c_img, c_content = st.columns([1, 2])
                             with c_img:
                                 st.image(row["Cover"] if row["Cover"]!="-" else "https://via.placeholder.com/100", use_container_width=True)
@@ -746,8 +761,6 @@ def main():
                                     st.markdown(f"<div class='tile-teaser'>{teaser_text}</div>", unsafe_allow_html=True)
                                 else: st.caption("Noch kein Teaser.")
                                 
-                                # --- DER EINZIGE BUTTON FÜR OPTION B ---
-                                # Innerhalb der Textspalte, damit er direkt drunter ist
                                 if st.button("ℹ️ Details", key=f"inf_{idx}_{is_wishlist}", type="primary"): 
                                     show_book_details(row, ws_books, ws_authors, ws_logs)
                                 
@@ -774,7 +787,7 @@ def main():
                         fa = smart_author(a, authors)
                         c, g, y = fetch_meta_single(t, fa)
                         ws_books.append_row([t, fa, g, "", c or "-", datetime.now().strftime("%Y-%m-%d"), inote, "Wunschliste", "", y or "", "", ""])
-                        auto_cleanup_authors(ws_books)
+                        auto_cleanup_authors(ws_books, ws_authors)
                         force_reload()
                         log_to_sheet(ws_logs, f"Wunsch: {t}", "WISH"); st.success("Gemerkt!"); st.balloons(); time.sleep(1); st.rerun()
         df_w = df[df["Status"] == "Wunschliste"].copy()
