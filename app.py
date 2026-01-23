@@ -265,10 +265,12 @@ def filter_and_sort_books(df_in, query, sort_by):
     df = df_in.copy()
     if query:
         q = query.lower()
+        # SUCHE AUCH IM LESEJAHR (als String)
         mask = (
             df['Titel'].str.lower().str.contains(q, na=False) |
             df['Autor'].str.lower().str.contains(q, na=False) |
-            df['Tags'].str.lower().str.contains(q, na=False)
+            df['Tags'].str.lower().str.contains(q, na=False) |
+            df['Lesejahr'].astype(str).str.contains(q, na=False)
         )
         df = df[mask]
     
@@ -661,6 +663,7 @@ def main():
             st.session_state.bg_message = None
 
         st.markdown("---")
+        
         st.write("⚙️ **Verwaltung**")
         st.link_button("📂 Tabelle öffnen", f"https://docs.google.com/spreadsheets/d/{sh.id}", use_container_width=True)
         st.button("🔄 Cache leeren", use_container_width=True, on_click=lambda: (force_reload(), st.rerun()))
@@ -731,7 +734,7 @@ def main():
     # --- RENDER FUNKTION ---
     def render_library_view(dataset, is_wishlist=False):
         c1, c2 = st.columns([2, 1])
-        with c1: q = st.text_input("Suche (Titel, Autor, Tags)", placeholder="Suchen...", label_visibility="collapsed")
+        with c1: q = st.text_input("Suche (Titel, Autor, Jahr)", placeholder="Suchen...", label_visibility="collapsed")
         with c2: sort_by = st.selectbox("Sortieren", ["Autor (A-Z)", "Titel (A-Z)", "Lesejahr (Neu -> Alt)"], label_visibility="collapsed")
         view_mode = st.radio("Ansicht", ["Kacheln", "Liste"], horizontal=True, label_visibility="collapsed", key=f"v_{is_wishlist}")
         
